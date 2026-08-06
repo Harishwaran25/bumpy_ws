@@ -56,7 +56,7 @@ bumpy_ws/
 
 ```bash
 # Clone the repository
-git clone https://github.com/ProfessionalSingle
+git clone https://github.com/rajagopal95
 
 # Move into workspace
 cd bumpy_ws
