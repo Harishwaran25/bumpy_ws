@@ -1,0 +1,21 @@
+digraph G {
+"bumpy7/base_link" -> "bumpy7/left_wheel"[label=" Broadcaster: default_authority\nAverage rate: 10.33\nBuffer length: 4.453\nMost recent transform: 1773996807.988961\nOldest transform: 1773996803.536067\n"];
+"bumpy7/base_footprint" -> "bumpy7/base_link"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"bumpy7/base_link" -> "bumpy7/right_wheel"[label=" Broadcaster: default_authority\nAverage rate: 10.33\nBuffer length: 4.453\nMost recent transform: 1773996807.988961\nOldest transform: 1773996803.536067\n"];
+"bumpy7/odom" -> "bumpy7/base_footprint"[label=" Broadcaster: default_authority\nAverage rate: 10.227\nBuffer length: 4.4\nMost recent transform: 1773996808.011445\nOldest transform: 1773996803.611406\n"];
+"bumpy7/plate_2" -> "bumpy7/camera_link"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"bumpy7/plate_1" -> "bumpy7/plate_2"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"bumpy7/camera_link" -> "bumpy7/camera_lens"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"bumpy7/base_link" -> "bumpy7/front_caster"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"bumpy7/base_link" -> "bumpy7/imu_link"[label=" Broadcaster: default_authority\nAverage rate: 44.229\nBuffer length: 4.454\nMost recent transform: 1773996808.067856\nOldest transform: 1773996803.613798\n"];
+"bumpy7/plate_2" -> "bumpy7/plate_3"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"bumpy7/base_footprint" -> "bumpy7/lidar_link"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"bumpy7/plate_3" -> "bumpy7/plate_4"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"bumpy7/base_link" -> "bumpy7/plate_1"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"bumpy7/base_link" -> "bumpy7/rear_caster"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"map" -> "bumpy7/odom"[label=" Broadcaster: default_authority\nAverage rate: 11.886\nBuffer length: 4.291\nMost recent transform: 1773996808.475202\nOldest transform: 1773996804.184306\n"];
+edge [style=invis];
+ subgraph cluster_legend { style=bold; color=black; label ="view_frames Result";
+"Recorded at time: 1773996808.0845702"[ shape=plaintext ] ;
+}->"map";
+}
