@@ -1,0 +1,94 @@
+from launch import LaunchDescription
+from launch_ros.actions import Node, PushRosNamespace
+from launch.actions import DeclareLaunchArgument, GroupAction
+from launch.substitutions import LaunchConfiguration
+
+def generate_launch_description():
+    # Declare namespace argument with bumpy1 as default
+    namespace_arg = DeclareLaunchArgument(
+        'namespace',
+        default_value='bumpy7',
+        description='Namespace for the robot'
+    )
+    
+    # Get namespace as a LaunchConfiguration
+    namespace = LaunchConfiguration('namespace')
+    
+    # Motor parameters
+    speed_multiplier_arg = DeclareLaunchArgument(
+        'speed_multiplier',
+        default_value='0.1',
+        description='Overall speed multiplier (0.0-1.0)'
+    )
+    
+    rotation_multiplier_arg = DeclareLaunchArgument(
+        'rotation_multiplier',
+        default_value='0.2',
+        description='Rotation speed multiplier (0.0-1.0)'
+    )
+    
+    linear_scale_arg = DeclareLaunchArgument(
+        'linear_scale',
+        default_value='0.4',
+        description='Additional scaling for linear movement (0.0-1.0)'
+    )
+    
+    max_linear_vel_arg = DeclareLaunchArgument(
+        'max_linear_vel',
+        default_value='0.4',
+        description='Maximum linear velocity from cmd_vel (m/s)'
+    )
+    
+    max_angular_vel_arg = DeclareLaunchArgument(
+        'max_angular_vel',
+        default_value='0.3',
+        description='Maximum angular velocity from cmd_vel (rad/s)'
+    )
+    
+    # Motor control node
+    motor_control_node = Node(
+        package='bumpy_firmware',
+        executable='control',
+        name='motor_control',
+        output='screen',
+        parameters=[{
+            'speed_multiplier': LaunchConfiguration('speed_multiplier'),
+            'rotation_multiplier': LaunchConfiguration('rotation_multiplier'),
+            'linear_scale': LaunchConfiguration('linear_scale'),
+            'max_linear_vel': LaunchConfiguration('max_linear_vel'),
+            'max_angular_vel': LaunchConfiguration('max_angular_vel')
+        }]
+    )
+    
+    ticks_publisher_node = Node(
+        package="bumpy_firmware",
+        executable="tick",
+        name="ticks_publisher"
+    )
+    
+    diff_node = Node(
+        package="bumpy_firmware",
+        executable="diff",
+        name="diff"
+    )
+    
+    # Group all motor nodes under the namespace
+    motor_nodes_group = GroupAction([
+        PushRosNamespace(namespace),
+        motor_control_node,
+        ticks_publisher_node,
+        diff_node
+    ])
+    
+    return LaunchDescription([
+        # Arguments
+        namespace_arg,
+        speed_multiplier_arg,
+        rotation_multiplier_arg,
+        linear_scale_arg,
+        max_linear_vel_arg,
+        max_angular_vel_arg,
+        
+        # Nodes (grouped with namespace)
+        motor_nodes_group
+    ])

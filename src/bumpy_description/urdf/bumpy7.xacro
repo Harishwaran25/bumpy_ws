@@ -1,0 +1,176 @@
+<?xml version="1.0"?>
+<robot name="bumpy7">
+
+  <!-- base_footprint: ground projection of robot center -->
+  <link name="bumpy7/base_footprint"/>
+
+  <joint name="base_footprint_to_base_link" type="fixed">
+    <parent link="bumpy7/base_footprint"/>
+    <child link="bumpy7/base_link"/>
+    <origin xyz="0 0 0.05" rpy="0 0 0"/>
+  </joint>
+
+  <!-- base_link: main robot body -->
+  <link name="bumpy7/base_link">
+    <visual>
+      <geometry>
+        <box size="0.25 0.18 0.10"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0.0 0.0 0.8 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.25 0.18 0.10"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="2.0"/>
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0"
+               iyy="0.01" iyz="0.0" izz="0.02"/>
+    </inertial>
+  </link>
+
+  <!-- Left wheel -->
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="bumpy7/base_link"/>
+    <child link="bumpy7/left_wheel"/>
+    <origin xyz="0.0 0.10 -0.03" rpy="-1.5708 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <link name="bumpy7/left_wheel">
+    <visual>
+      <geometry>
+        <cylinder radius="0.033" length="0.02"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.0 0.0 0.0 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.033" length="0.02"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <inertia ixx="0.0001" ixy="0.0" ixz="0.0"
+               iyy="0.0001" iyz="0.0" izz="0.0002"/>
+    </inertial>
+  </link>
+
+  <!-- Right wheel -->
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="bumpy7/base_link"/>
+    <child link="bumpy7/right_wheel"/>
+    <origin xyz="0.0 -0.10 -0.03" rpy="-1.5708 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <link name="bumpy7/right_wheel">
+    <visual>
+      <geometry>
+        <cylinder radius="0.033" length="0.02"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.0 0.0 0.0 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.033" length="0.02"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <inertia ixx="0.0001" ixy="0.0" ixz="0.0"
+               iyy="0.0001" iyz="0.0" izz="0.0002"/>
+    </inertial>
+  </link>
+
+  <!-- Front caster -->
+  <joint name="front_caster_joint" type="fixed">
+    <parent link="bumpy7/base_link"/>
+    <child link="bumpy7/front_caster"/>
+    <origin xyz="0.10 0.0 -0.05" rpy="0 0 0"/>
+  </joint>
+
+  <link name="bumpy7/front_caster">
+    <visual>
+      <geometry>
+        <sphere radius="0.015"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.5 0.5 0.5 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <sphere radius="0.015"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.00001" ixy="0.0" ixz="0.0"
+               iyy="0.00001" iyz="0.0" izz="0.00001"/>
+    </inertial>
+  </link>
+
+  <!-- Rear caster -->
+  <joint name="rear_caster_joint" type="fixed">
+    <parent link="bumpy7/base_link"/>
+    <child link="bumpy7/rear_caster"/>
+    <origin xyz="-0.10 0.0 -0.05" rpy="0 0 0"/>
+  </joint>
+
+  <link name="bumpy7/rear_caster">
+    <visual>
+      <geometry>
+        <sphere radius="0.015"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.5 0.5 0.5 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <sphere radius="0.015"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.00001" ixy="0.0" ixz="0.0"
+               iyy="0.00001" iyz="0.0" izz="0.00001"/>
+    </inertial>
+  </link>
+
+  <!-- IMU link -->
+  <joint name="imu_joint" type="fixed">
+    <parent link="bumpy7/base_link"/>
+    <child link="bumpy7/imu_link"/>
+    <origin xyz="0.0 0.0 0.05" rpy="0 0 0"/>
+  </joint>
+
+  <link name="bumpy7/imu_link"/>
+
+  <!-- Lidar link - mounted on top front -->
+  <joint name="lidar_joint" type="fixed">
+    <parent link="bumpy7/base_link"/>
+    <child link="bumpy7/lidar_link"/>
+    <origin xyz="0.08 0.0 0.08" rpy="0 0 0"/>
+  </joint>
+
+  <link name="bumpy7/lidar_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.03" length="0.04"/>
+      </geometry>
+      <material name="red">
+        <color rgba="0.8 0.0 0.0 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+</robot>

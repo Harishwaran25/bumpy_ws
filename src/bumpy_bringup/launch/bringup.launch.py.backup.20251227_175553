@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription, RegisterEventHandler, GroupAction
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.event_handlers import OnProcessExit
+from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
+from launch_ros.actions import Node, PushRosNamespace
+from launch_ros.substitutions import FindPackageShare
+
+
+def generate_launch_description():
+    # Launch Arguments
+    use_sim_time = LaunchConfiguration('use_sim_time', default='false')
+    
+    # Define fixed namespace for bumpy6
+    namespace = 'bumpy7'
+    
+    # Paths
+    bumpy_description_pkg = FindPackageShare('bumpy_description')
+    bumpy_firmware_pkg = FindPackageShare('bumpy_firmware')
+    bumpy_sensors_pkg = FindPackageShare('bumpy_sensors')
+    
+    # Include robot description launch with namespace argument
+    robot_description_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([
+            PathJoinSubstitution([bumpy_description_pkg, 'launch', 'robot.launch.py'])
+        ]),
+        launch_arguments={
+            'use_sim_time': use_sim_time,
+            'namespace': namespace
+        }.items()
+    )
+    
+    motor_control_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([
+            PathJoinSubstitution([bumpy_firmware_pkg, 'launch', 'motor_control.launch.py'])
+        ]),
+        launch_arguments={
+            'use_sim_time': use_sim_time,
+            'namespace': namespace
+        }.items()
+    )
+    
+
+    # Camera Node with remapping to fix the namespace issue
+    camera_node = Node(
+        package='bumpy_sensors',
+        executable='camera_node',
+        name='camera_node',
+        output='screen',
+        remappings=[
+            # Remap the absolute camera topic to a relative one
+            # This will make it publish to /bumpy6/image_raw instead of /camera/image_raw
+            ('/camera/image_raw', 'image_raw')
+        ]
+    )
+    
+    imu_node = Node(
+        package='bumpy_sensors',
+        executable='imu_node',
+        name='imu_node',
+        output='screen'
+    )
+    
+    # Gas Sensor Node (MQ2 + Ultrasonic)
+    gas_sensor_node = Node(
+        package='bumpy_sensors',
+        executable='gas_sensor_node',
+        name='gas_sensor_node',
+        output='screen',
+        respawn=True,
+        respawn_delay=2.0
+    )
+    
+    # Group sensor nodes under namespace
+    sensors_group = GroupAction([
+        PushRosNamespace(namespace),
+        camera_node,
+        imu_node,
+        gas_sensor_node
+    ])
+    
+    # Create launch description
+    ld = LaunchDescription()
+    
+    # Add robot description launch
+    ld.add_action(robot_description_launch)
+    ld.add_action(motor_control_launch)
+    
+    # Add sensor nodes group with namespace
+    ld.add_action(sensors_group)
+    
+    return ld

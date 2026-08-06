@@ -1,0 +1,39 @@
+ros__parameters:
+    frequency: 20.0          # Reduced from 30 — was causing "Failed to meet update rate" errors
+    sensor_timeout: 0.2      # Increased from 0.1 — gives sensors more headroom
+    two_d_mode: true
+    publish_tf: true         # EKF is the SOLE publisher of odom→base_footprint TF
+    publish_acceleration: false
+
+    map_frame:       map
+    odom_frame:      bumpy7/odom
+    base_link_frame: bumpy7/base_footprint
+    world_frame:     bumpy7/odom
+
+    # ── Wheel odometry (from diff_tf.py) ────────────────────────────────────
+    # diff_tf publishes /bumpy7/odom topic only (publish_tf: false in diff params)
+    odom0: /bumpy7/odom
+    odom0_config: [true,  true,  false,    # x, y, z
+                   false, false, false,    # roll, pitch, yaw
+                   true,  true,  false,    # vx, vy, vz
+                   false, false, true,     # vroll, vpitch, vyaw
+                   false, false, false]    # ax, ay, az
+    odom0_differential: false
+    odom0_relative:     false
+    odom0_queue_size:   10
+
+    # ── IMU (MPU6050 via complementary filter) ───────────────────────────────
+    imu0: /bumpy7/imu/data
+    imu0_config: [false, false, false,    # x, y, z
+                  false, false, true,     # roll, pitch, yaw  ← yaw only (no magnetometer)
+                  false, false, false,    # vx, vy, vz
+                  false, false, true,     # vroll, vpitch, vyaw
+                  false, false, false]    # ax, ay, az
+    imu0_differential: false
+    imu0_relative:     true              # IMPORTANT: MPU6050 has no magnetometer.
+                                         # relative=true means the EKF treats the
+                                         # first reading as the zero reference,
+                                         # preventing garbage absolute yaw on startup.
+    imu0_queue_size:   10
+    imu0_nodelay:      false
+    imu0_remove_gravitational_acceleration: true

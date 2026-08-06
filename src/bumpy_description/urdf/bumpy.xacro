@@ -1,0 +1,270 @@
+<?xml version="1.0"?>
+<robot name="bumpy7_robot" xmlns:xacro="http://ros.org/wiki/xacro">
+  <!-- Add namespace parameter with default -->
+  <xacro:arg name="namespace" default="bumpy7"/>
+  <xacro:property name="ns" value="$(arg namespace)"/>
+
+  <!-- Properties -->
+  <xacro:property name="wheel_radius" value="0.022"/>
+  <xacro:property name="wheel_length" value="0.01"/>
+  <xacro:property name="wheel_separation" value="0.07"/>
+  <xacro:property name="plate_radius" value="0.065"/>
+  <xacro:property name="plate_height" value="0.01"/>
+  <xacro:property name="plate_spacing" value="0.04"/>
+  <xacro:property name="caster_radius" value="0.01"/>
+  
+  <!-- Materials for visualization -->
+  <material name="white">
+    <color rgba="1 1 1 1"/>
+  </material>
+  <material name="black">
+    <color rgba="0 0 0 1"/>
+  </material>
+  <material name="gray">
+    <color rgba="0.5 0.5 0.5 1"/>
+  </material>
+  <material name="red">
+    <color rgba="0.8 0 0 1"/>
+  </material>
+  <material name="blue">
+    <color rgba="0 0 0.8 1"/>
+  </material>
+
+  <!-- Wheel macro -->
+  <xacro:macro name="wheel" params="prefix reflect">
+    <link name="${ns}/${prefix}_wheel">
+      <visual>
+        <geometry>
+          <cylinder length="${wheel_length}" radius="${wheel_radius}"/>
+        </geometry>
+        <material name="black"/>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+      </visual>
+      <collision>
+        <geometry>
+          <cylinder length="${wheel_length}" radius="${wheel_radius}"/>
+        </geometry>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+      </collision>
+      <inertial>
+        <mass value="0.1"/>
+        <inertia ixx="0.00003" ixy="0" ixz="0" iyy="0.00003" iyz="0" izz="0.00005"/>
+      </inertial>
+    </link>
+
+    <joint name="${ns}/${prefix}_wheel_joint" type="continuous">
+      <parent link="${ns}/base_link"/>
+      <child link="${ns}/${prefix}_wheel"/>
+      <origin xyz="0 ${reflect * wheel_separation/2} -0.005" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- Caster wheel macro -->
+  <xacro:macro name="caster" params="prefix position_x">
+    <link name="${ns}/${prefix}_caster">
+      <visual>
+        <geometry>
+          <sphere radius="${caster_radius}"/>
+        </geometry>
+        <material name="gray"/>
+      </visual>
+      <collision>
+        <geometry>
+          <sphere radius="${caster_radius}"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="0.05"/>
+        <inertia ixx="0.000002" ixy="0" ixz="0" iyy="0.000002" iyz="0" izz="0.000002"/>
+      </inertial>
+    </link>
+
+    <joint name="${ns}/${prefix}_caster_joint" type="fixed">
+      <parent link="${ns}/base_link"/>
+      <child link="${ns}/${prefix}_caster"/>
+      <origin xyz="${position_x} 0 -0.01" rpy="0 0 0"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- Plate macro -->
+  <xacro:macro name="plate" params="number parent offset">
+    <link name="${ns}/plate_${number}">
+      <visual>
+        <geometry>
+          <cylinder length="${plate_height}" radius="${plate_radius}"/>
+        </geometry>
+        <material name="white"/>
+      </visual>
+      <collision>
+        <geometry>
+          <cylinder length="${plate_height}" radius="${plate_radius}"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="0.3"/>
+        <inertia ixx="0.0006" ixy="0" ixz="0" iyy="0.0006" iyz="0" izz="0.0012"/>
+      </inertial>
+    </link>
+
+    <joint name="${ns}/plate_${number}_joint" type="fixed">
+      <parent link="${parent}"/>
+      <child link="${ns}/plate_${number}"/>
+      <origin xyz="0 0 ${offset}" rpy="0 0 0"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- Base Footprint -->
+  <link name="${ns}/base_footprint">
+    <visual>
+      <geometry>
+        <box size="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.0001"/>
+      <inertia ixx="0.0000001" ixy="0" ixz="0" iyy="0.0000001" iyz="0" izz="0.0000001"/>
+    </inertial>
+  </link>
+  
+  <joint name="${ns}/base_joint" type="fixed">
+    <parent link="${ns}/base_footprint"/>
+    <child link="${ns}/base_link"/>
+    <origin xyz="0 0 ${wheel_radius + 0.005}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Base plate (Bottom "bun") -->
+  <link name="${ns}/base_link">
+    <visual>
+      <geometry>
+        <cylinder length="${plate_height}" radius="${plate_radius}"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder length="${plate_height}" radius="${plate_radius}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.5"/>
+      <inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.0008" iyz="0" izz="0.0015"/>
+    </inertial>
+  </link>
+
+  <!-- Add wheels -->
+  <xacro:wheel prefix="right" reflect="-1" />
+  <xacro:wheel prefix="left" reflect="1" />
+
+  <!-- Add caster wheels -->
+  <xacro:caster prefix="front" position_x="0.055" />
+  <xacro:caster prefix="rear" position_x="-0.055" />
+
+  <!-- Add plates -->
+  <xacro:plate number="1" parent="${ns}/base_link" offset="${plate_spacing}" />
+  <xacro:plate number="2" parent="${ns}/plate_1" offset="${plate_spacing}" />
+  <xacro:plate number="3" parent="${ns}/plate_2" offset="${plate_spacing}" />
+  <xacro:plate number="4" parent="${ns}/plate_3" offset="${plate_spacing}" />
+
+  <!-- Camera Link -->
+  <link name="${ns}/camera_link">
+    <visual>
+      <geometry>
+        <box size="0.03 0.04 0.02"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.03 0.04 0.02"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <inertia ixx="0.000017" ixy="0" ixz="0" iyy="0.000017" iyz="0" izz="0.000017"/>
+    </inertial>
+  </link>
+
+  <!-- Camera Joint -->
+  <joint name="${ns}/camera_joint" type="fixed">
+    <parent link="${ns}/plate_2"/>
+    <child link="${ns}/camera_link"/>
+    <origin xyz="0.05 0 0.005" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Camera Lens -->
+  <link name="${ns}/camera_lens">
+    <visual>
+      <geometry>
+        <cylinder length="0.005" radius="0.005"/>
+      </geometry>
+      <material name="blue"/>
+    </visual>
+  </link>
+
+  <!-- Camera Lens Joint -->
+  <joint name="${ns}/camera_lens_joint" type="fixed">
+    <parent link="${ns}/camera_link"/>
+    <child link="${ns}/camera_lens"/>
+    <origin xyz="0.02 0 0" rpy="0 ${pi/2} 0"/>
+  </joint>
+
+  <!-- IMU Link -->
+  <link name="${ns}/imu_link">
+    <visual>
+      <geometry>
+        <box size="0.02 0.02 0.01"/>
+      </geometry>
+      <material name="gray"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.02 0.02 0.01"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.000004" ixy="0" ixz="0" iyy="0.000004" iyz="0" izz="0.000004"/>
+    </inertial>
+  </link>
+
+  <!-- IMU Joint -->
+  <joint name="${ns}/imu_joint" type="fixed">
+    <parent link="${ns}/plate_3"/>
+    <child link="${ns}/imu_link"/>
+    <origin xyz="0 0 0.005" rpy="0 0 0"/>
+  </joint>
+
+ <!-- Lidar Link -->
+  <link name="${ns}/lidar_link">
+    <visual>
+      <geometry>
+        <cylinder length="0.02" radius="0.03"/>
+      </geometry>
+      <material name="red"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder length="0.02" radius="0.03"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <inertia ixx="0.000017" ixy="0" ixz="0" iyy="0.000017" iyz="0" izz="0.000017"/>
+    </inertial>
+  </link>
+
+  <!-- Lidar Joint -->
+  <joint name="${ns}/lidar_joint" type="fixed">
+    <parent link="${ns}/plate_4"/>
+    <child link="${ns}/lidar_link"/>
+    <origin xyz="0 0 0.01" rpy="0 0 0"/>
+  </joint>
+
+</robot>

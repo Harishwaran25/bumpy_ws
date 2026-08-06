@@ -1,0 +1,1381 @@
+#!/usr/bin/env python3
+
+from flask import Flask, render_template_string, jsonify, request, send_from_directory, Response
+from flask_cors import CORS
+import rclpy
+from rclpy.node import Node
+from rclpy.action import ActionClient
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from std_msgs.msg import Float32, String
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan, Image as RosImage
+from nav2_msgs.action import NavigateToPose
+from cv_bridge import CvBridge
+import threading
+import json
+import os
+import yaml
+import subprocess
+import math
+import time
+import cv2
+import numpy as np
+from datetime import datetime
+import socket
+import signal
+import netifaces
+
+# ── Camera configuration ───────────────────────────────────────────────────
+# The node subscribes to a ROS2 image topic published by your camera node.
+# Change CAMERA_TOPIC to match what your camera node publishes, e.g.:
+#   /camera/image_raw          (usb_cam, v4l2_camera)
+#   /camera/color/image_raw    (RealSense)
+#   /image_raw                 (some USB cam nodes)
+CAMERA_TOPIC = '/bumpy7/image_raw'
+
+# ── Other config ───────────────────────────────────────────────────────────
+CMD_VEL_TOPIC = "/bumpy7/cmd_vel"
+MAP_DIRECTORY = os.path.expanduser("~/bumpy_ws/src/bumpy_slam/maps/")
+WAYPOINTS_DIRECTORY = os.path.expanduser("~/bumpy_ws/src/bumpy_slam/waypoints/")
+ROBOT_NAME = "bumpy7"   # This robot's name — used for leader comparison
+
+slam_process = None
+slam_running = False
+
+
+# ── Utility helpers ────────────────────────────────────────────────────────
+
+def get_local_ip():
+    try:
+        for interface in netifaces.interfaces():
+            addrs = netifaces.ifaddresses(interface)
+            if netifaces.AF_INET in addrs:
+                for addr in addrs[netifaces.AF_INET]:
+                    ip = addr['addr']
+                    if not ip.startswith('127.') and ip.startswith('192.168.'):
+                        return ip
+        return socket.gethostbyname(socket.gethostname())
+    except:
+        return '127.0.0.1'
+
+def load_waypoints(map_name):
+    waypoint_file = os.path.join(WAYPOINTS_DIRECTORY, f"{map_name}_waypoints.json")
+    if os.path.exists(waypoint_file):
+        with open(waypoint_file, 'r') as f:
+            return json.load(f)
+    return []
+
+def save_waypoints(map_name, waypoints):
+    os.makedirs(WAYPOINTS_DIRECTORY, exist_ok=True)
+    with open(os.path.join(WAYPOINTS_DIRECTORY, f"{map_name}_waypoints.json"), 'w') as f:
+        json.dump(waypoints, f, indent=2)
+    return True
+
+def load_map_yaml(map_name):
+    yaml_path = os.path.join(MAP_DIRECTORY, f"{map_name}.yaml")
+    try:
+        if not os.path.exists(yaml_path):
+            return None
+        with open(yaml_path, 'r') as f:
+            return yaml.safe_load(f)
+    except Exception as e:
+        print(f"⚠️  Error loading map YAML: {e}")
+        return None
+
+def get_available_maps():
+    maps = []
+    try:
+        os.makedirs(MAP_DIRECTORY, exist_ok=True)
+        for file in os.listdir(MAP_DIRECTORY):
+            if file.endswith('.yaml'):
+                map_name = file.replace('.yaml', '')
+                yaml_path = os.path.join(MAP_DIRECTORY, file)
+                created = os.path.getctime(yaml_path)
+                maps.append({'name': map_name,
+                             'created': datetime.fromtimestamp(created).strftime('%Y-%m-%d %H:%M:%S')})
+    except Exception as e:
+        print(f"Error getting maps: {e}")
+    maps.sort(key=lambda x: x['created'], reverse=True)
+    return maps
+
+def get_map_image_path(map_name):
+    map_yaml = load_map_yaml(map_name)
+    if map_yaml and 'image' in map_yaml:
+        image_name = map_yaml['image']
+        if not image_name.startswith('/'):
+            return os.path.join(MAP_DIRECTORY, image_name)
+        return image_name
+    for ext in ['.png', '.pgm', '.jpg']:
+        path = os.path.join(MAP_DIRECTORY, f"{map_name}{ext}")
+        if os.path.exists(path):
+            return path
+    return None
+
+def start_slam_mapping():
+    global slam_process, slam_running
+    try:
+        slam_process = subprocess.Popen(
+            ['ros2', 'launch', 'slam_toolbox', 'online_async_launch.py', 'use_sim_time:=false'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid)
+        slam_running = True
+        print("✅ SLAM mapping started")
+        return True
+    except Exception as e:
+        print(f"❌ Error starting SLAM: {e}")
+        return False
+
+def stop_slam_mapping():
+    global slam_process, slam_running
+    try:
+        if slam_process:
+            os.killpg(os.getpgid(slam_process.pid), signal.SIGTERM)
+            slam_process.wait(timeout=5)
+            slam_process = None
+        slam_running = False
+        print("✅ SLAM mapping stopped")
+        return True
+    except Exception as e:
+        print(f"❌ Error stopping SLAM: {e}")
+        return False
+
+def save_current_map(map_name):
+    try:
+        map_path = os.path.join(MAP_DIRECTORY, map_name)
+        result = subprocess.run(
+            ['ros2', 'run', 'nav2_map_server', 'map_saver_cli', '-f', map_path,
+             '--ros-args', '-p', 'save_map_timeout:=10000'],
+            capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            print(f"✅ Map saved: {map_name}")
+            return True
+        print(f"❌ Map save failed: {result.stderr}")
+        return False
+    except Exception as e:
+        print(f"❌ Error saving map: {e}")
+        return False
+
+
+# ── Flask app ──────────────────────────────────────────────────────────────
+app = Flask(__name__)
+CORS(app)
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bumpy7 - Robot Control System</title>
+    <style>
+        :root {
+            --bg-gradient-1: #87CEEB; --bg-gradient-2: #4A90E2; --bg-gradient-3: #E0F6FF;
+            --panel-bg: #ffffff; --panel-shadow: rgba(0,0,0,0.1);
+            --text-primary: #333333; --text-secondary: #666666;
+            --border-color: #e0e0e0; --control-bg: #f9f9f9; --control-hover: #f0f0f0;
+            --canvas-bg: #f0f0f0; --canvas-border: #4A90E2;
+            --header-gradient-1: #4A90E2; --header-gradient-2: #87CEEB;
+            --slider-track: #e0e0e0; --slider-thumb: #4A90E2; --text-color: #212529;
+        }
+        [data-theme="dark"] {
+            --bg-gradient-1: #1a1a2e; --bg-gradient-2: #16213e; --bg-gradient-3: #0f3460;
+            --panel-bg: #1e1e1e; --panel-shadow: rgba(0,0,0,0.5);
+            --text-primary: #e0e0e0; --text-secondary: #b0b0b0;
+            --border-color: #3a3a3a; --control-bg: #2a2a2a; --control-hover: #333333;
+            --canvas-bg: #1a1a1a; --canvas-border: #4A90E2;
+            --header-gradient-1: #16213e; --header-gradient-2: #0f3460;
+            --slider-track: #3a3a3a; --slider-thumb: #4dabf7; --text-color: #f8f9fa;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg,var(--bg-gradient-1) 0%,var(--bg-gradient-2) 50%,var(--bg-gradient-3) 100%);
+            min-height:100vh; display:flex; justify-content:center; align-items:center;
+        }
+        .login-container { background:var(--panel-bg); padding:40px; border-radius:20px; box-shadow:0 20px 60px var(--panel-shadow); width:400px; }
+        .login-header { text-align:center; margin-bottom:30px; }
+        .login-header h1 { color:#4A90E2; font-size:28px; margin-bottom:10px; }
+        .login-header p { color:var(--text-secondary); font-size:14px; }
+        .form-group { margin-bottom:20px; }
+        .form-group label { display:block; margin-bottom:8px; color:var(--text-primary); font-weight:600; }
+        .form-group input { width:100%; padding:12px; border:2px solid var(--border-color); border-radius:8px; font-size:14px; background:var(--panel-bg); color:var(--text-primary); }
+        .form-group input:focus { outline:none; border-color:#4A90E2; }
+        .login-btn { width:100%; padding:14px; background:linear-gradient(135deg,#4A90E2 0%,#87CEEB 100%); color:white; border:none; border-radius:8px; font-size:16px; font-weight:600; cursor:pointer; }
+        .error-msg { background:#fee; color:#c33; padding:10px; border-radius:8px; margin-bottom:20px; display:none; }
+        .dashboard { display:none; width:100vw; height:100vh; background:var(--panel-bg); }
+        .header { background:linear-gradient(135deg,var(--header-gradient-1) 0%,var(--header-gradient-2) 100%); color:white; padding:15px 30px; display:flex; justify-content:space-between; align-items:center; box-shadow:0 2px 10px var(--panel-shadow); }
+        .header h1 { font-size:24px; }
+        .logout-btn { padding:8px 20px; background:rgba(255,255,255,0.2); color:white; border:2px solid white; border-radius:8px; cursor:pointer; font-weight:600; }
+        .main-content { display:grid; grid-template-columns:350px 1fr 350px; gap:0; height:calc(100vh - 60px); overflow:hidden; background:var(--bg-gradient-3); }
+        .left-panel,.right-panel { padding:20px; overflow-y:auto; background:var(--panel-bg); display:flex; flex-direction:column; gap:20px; }
+        .left-panel { box-shadow:2px 0 10px var(--panel-shadow); }
+        .right-panel { box-shadow:-2px 0 10px var(--panel-shadow); }
+        .center-panel { display:flex; flex-direction:column; padding:20px; overflow:hidden; background:var(--panel-bg); }
+        .control-section { background:var(--panel-bg); padding:20px; border-radius:12px; box-shadow:0 2px 8px var(--panel-shadow); border:1px solid var(--border-color); }
+        .control-section h3 { color:#4A90E2; margin-bottom:15px; font-size:18px; border-bottom:2px solid #4A90E2; padding-bottom:8px; }
+        .joystick-container { display:flex; flex-direction:column; align-items:center; gap:15px; }
+        .teleop-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; width:100%; max-width:280px; }
+        .teleop-btn { padding:20px; font-size:24px; background:linear-gradient(135deg,#4A90E2 0%,#87CEEB 100%); color:white; border:3px solid #2E5C8A; border-radius:12px; cursor:pointer; font-weight:600; transition:all 0.2s; user-select:none; box-shadow:0 4px 10px rgba(0,0,0,0.2); }
+        .teleop-btn small { font-size:11px; opacity:.9; display:block; margin-top:4px; }
+        .teleop-btn:hover { transform:scale(1.05); }
+        .teleop-btn:active { transform:scale(0.95); }
+        .teleop-btn.stop-btn { background:linear-gradient(135deg,#dc3545 0%,#c82333 100%); border-color:#bd2130; }
+        .speed-control { display:flex; align-items:center; gap:10px; margin-top:10px; color:var(--text-color); }
+        .speed-slider { flex:1; height:8px; border-radius:4px; background:var(--slider-track); outline:none; -webkit-appearance:none; }
+        .speed-slider::-webkit-slider-thumb { -webkit-appearance:none; width:20px; height:20px; border-radius:50%; background:var(--slider-thumb); cursor:pointer; }
+        .map-canvas-container { background:var(--panel-bg); border-radius:12px; padding:20px; box-shadow:0 4px 20px var(--panel-shadow); height:100%; display:flex; flex-direction:column; border:1px solid var(--border-color); }
+        .top-controls { display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; padding-bottom:15px; border-bottom:2px solid var(--border-color); flex-wrap:wrap; gap:10px; }
+        .control-group { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+        #mapCanvas { flex:1; border:2px solid var(--canvas-border); border-radius:8px; cursor:crosshair; background:var(--canvas-bg); }
+        .waypoint-actions-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:15px; }
+        .waypoint-list-header { padding:8px 0; color:var(--text-primary); font-size:14px; border-bottom:1px solid var(--border-color); margin-bottom:10px; }
+        .btn { padding:10px 20px; border:none; border-radius:8px; cursor:pointer; font-weight:600; transition:all 0.2s; }
+        .btn-primary { background:linear-gradient(135deg,#4A90E2 0%,#87CEEB 100%); color:white; }
+        .btn-secondary { background:#6c757d; color:white; }
+        .btn-success { background:#28a745; color:white; }
+        .btn-danger { background:#dc3545; color:white; }
+        .btn:hover { transform:translateY(-2px); box-shadow:0 4px 12px rgba(0,0,0,0.2); }
+        .btn:disabled { opacity:.5; cursor:not-allowed; transform:none; }
+        .status-indicator { display:inline-block; width:12px; height:12px; border-radius:50%; margin-right:8px; }
+        .status-active { background:#28a745; animation:pulse 2s infinite; }
+        .status-idle { background:#6c757d; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+        .slam-controls { display:flex; gap:10px; flex-wrap:wrap; }
+        .info-badge { display:inline-block; padding:4px 12px; border-radius:12px; font-size:12px; font-weight:600; margin-top:5px; }
+        .info-badge.success { background:#d4edda; color:#155724; }
+        .info-badge.warning { background:#fff3cd; color:#856404; }
+        .waypoint-list { max-height:200px; overflow-y:auto; }
+        .waypoint-item { display:flex; justify-content:space-between; align-items:center; padding:8px; background:var(--control-bg); border-radius:6px; margin-bottom:8px; color:var(--text-primary); }
+        .waypoint-item:hover { background:var(--control-hover); }
+        .waypoint-actions { display:flex; gap:5px; }
+        .icon-btn { padding:4px 8px; border:none; border-radius:4px; cursor:pointer; font-size:12px; }
+        .debug-info { background:var(--control-bg); padding:10px; border-radius:8px; font-family:monospace; font-size:12px; margin-top:10px; color:var(--text-primary); border:1px solid var(--border-color); }
+        .debug-info div { margin:3px 0; }
+        .connection-status { display:flex; align-items:center; gap:8px; padding:8px 12px; background:rgba(255,255,255,0.2); border-radius:8px; font-size:14px; }
+        .modal { display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.5); }
+        .modal-content { background:var(--panel-bg); margin:15% auto; padding:30px; border-radius:12px; width:400px; box-shadow:0 4px 20px var(--panel-shadow); }
+        .modal-header { font-size:20px; font-weight:600; color:#4A90E2; margin-bottom:20px; }
+        .modal-input { width:100%; padding:12px; border:2px solid var(--border-color); border-radius:8px; font-size:14px; margin-bottom:20px; background:var(--panel-bg); color:var(--text-primary); }
+        .modal-buttons { display:flex; gap:10px; justify-content:flex-end; }
+        .theme-toggle { padding:8px 16px; background:rgba(255,255,255,0.2); color:white; border:2px solid white; border-radius:8px; cursor:pointer; font-weight:600; display:flex; align-items:center; gap:8px; }
+        /* Camera */
+        .camera-badge { display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; margin-left:8px; font-weight:600; vertical-align:middle; }
+        .camera-badge.active { background:#d4edda; color:#155724; }
+        .camera-badge.inactive { background:#f8d7da; color:#721c24; }
+        .camera-badge.waiting { background:#fff3cd; color:#856404; }
+        .camera-topic-info { font-size:11px; color:var(--text-secondary); margin-top:4px; font-family:monospace; }
+        .camera-no-feed { padding:30px; text-align:center; color:var(--text-secondary); font-size:13px; background:var(--control-bg); border-radius:8px; border:2px dashed var(--border-color); }
+        .battery-bar-wrap { background:var(--slider-track); border-radius:6px; height:12px; margin-top:6px; overflow:hidden; }
+        .battery-bar { height:100%; border-radius:6px; transition:width 0.5s, background 0.5s; }
+        .confidence-bar-wrap { background:var(--slider-track); border-radius:6px; height:12px; margin-top:6px; overflow:hidden; }
+        .confidence-bar { height:100%; border-radius:6px; background:#4A90E2; transition:width 0.5s; }
+        .role-badge { display:inline-block; padding:6px 18px; border-radius:20px; font-size:15px; font-weight:700; letter-spacing:1px; margin-bottom:10px; }
+        .role-leader { background:linear-gradient(135deg,#FFD700,#FFA500); color:#5a3e00; box-shadow:0 2px 10px rgba(255,165,0,0.4); }
+        .role-follower { background:linear-gradient(135deg,#6c757d,#495057); color:#ffffff; }
+        .role-unknown { background:var(--control-bg); color:var(--text-secondary); }
+        .leader-info { font-size:12px; color:var(--text-secondary); margin-top:4px; }
+        /* Robot cards */
+        .robot-card { border:1px solid var(--border-color); border-radius:10px; overflow:hidden; }
+        .robot-card-header { display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:var(--control-bg); border-bottom:1px solid var(--border-color); }
+        .robot-card-name { font-weight:700; font-size:14px; color:var(--text-primary); }
+        .robot-card-role { font-size:12px; font-weight:700; padding:3px 12px; border-radius:12px; }
+        .robot-card-role.role-leader { background:linear-gradient(135deg,#FFD700,#FFA500); color:#5a3e00; }
+        .robot-card-role.role-follower { background:#6c757d; color:#fff; }
+        .robot-card-role.role-unknown { background:var(--border-color); color:var(--text-secondary); }
+        .robot-card-body { padding:10px 14px; }
+        .robot-card-row { display:flex; justify-content:space-between; font-size:13px; color:var(--text-primary); }
+        .mini-bar-wrap { background:var(--slider-track); border-radius:4px; height:8px; margin-top:4px; overflow:hidden; }
+        .mini-bar { height:100%; border-radius:4px; transition:width 0.5s, background 0.5s; }
+        .robot-info-card { background:var(--control-bg); border:1px solid var(--border-color); border-radius:10px; padding:14px; }
+        .robot-info-row { display:flex; align-items:center; justify-content:space-between; }
+        .robot-info-label { font-size:13px; font-weight:600; color:var(--text-secondary); }
+        .robot-info-value { font-size:14px; font-weight:700; color:var(--text-primary); }
+        .robot-info-unit { font-size:12px; color:var(--text-secondary); margin-left:2px; }
+        .robot-name-badge { background:linear-gradient(135deg,#4A90E2,#87CEEB); color:#fff; padding:3px 12px; border-radius:12px; font-size:13px; font-weight:700; letter-spacing:0.5px; }
+        .role-toggle { display:flex; border-radius:8px; overflow:hidden; border:2px solid #4A90E2; }
+        .role-btn { padding:5px 14px; border:none; cursor:pointer; font-size:12px; font-weight:600; background:var(--control-bg); color:var(--text-primary); transition:all 0.2s; }
+        .role-btn.role-active { background:#4A90E2; color:#fff; }
+        .role-btn:hover:not(.role-active) { background:var(--control-hover); }
+        
+        /* ✨ Toggle Switch Styles */
+        .toggle-switch { position:relative; display:inline-block; width:50px; height:24px; }
+        .toggle-switch input { opacity:0; width:0; height:0; }
+        .toggle-slider { position:absolute; cursor:pointer; top:0; left:0; right:0; bottom:0; background-color:#ccc; transition:0.4s; border-radius:24px; }
+        .toggle-slider:before { position:absolute; content:""; height:18px; width:18px; left:3px; bottom:3px; background-color:white; transition:0.4s; border-radius:50%; }
+        input:checked + .toggle-slider { background-color:#4A90E2; }
+        input:checked + .toggle-slider:before { transform:translateX(26px); }
+    </style>
+</head>
+<body>
+    <div class="login-container" id="loginScreen">
+        <div class="login-header">
+            <h1>🤖 Bumpy7 Control</h1>
+            <p>Advanced Robot Navigation System</p>
+        </div>
+        <div class="error-msg" id="loginError">Invalid credentials</div>
+        <form id="loginForm">
+            <div class="form-group"><label>Username</label><input type="text" id="username" required></div>
+            <div class="form-group"><label>Password</label><input type="password" id="password" required></div>
+            <button type="submit" class="login-btn">Login</button>
+        </form>
+    </div>
+
+    <div class="dashboard" id="dashboard">
+        <div class="header">
+            <h1>🤖 Bumpy7 Control Dashboard</h1>
+            <div style="display:flex;gap:15px;align-items:center;">
+                <div class="connection-status" id="connectionStatus">
+                    <span class="status-indicator status-idle"></span><span>Connecting...</span>
+                </div>
+                <button class="theme-toggle" onclick="toggleTheme()">
+                    <span id="themeIcon">🌙</span><span id="themeText">Dark</span>
+                </button>
+                <button class="logout-btn" onclick="logout()">Logout</button>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <!-- Left Panel -->
+            <div class="left-panel">
+                <div class="control-section">
+                    <h3>🎮 Manual Control</h3>
+                    <div class="joystick-container">
+                        <div class="teleop-grid">
+                            <div></div>
+                            <button class="teleop-btn" onmousedown="teleopStart('forward')" onmouseup="teleopStop()" ontouchstart="teleopStart('forward')" ontouchend="teleopStop()">▲<br><small>W</small></button>
+                            <div></div>
+                            <button class="teleop-btn" onmousedown="teleopStart('left')" onmouseup="teleopStop()" ontouchstart="teleopStart('left')" ontouchend="teleopStop()">◄<br><small>A</small></button>
+                            <button class="teleop-btn stop-btn" onclick="emergencyStop()">⬛<br><small>STOP</small></button>
+                            <button class="teleop-btn" onmousedown="teleopStart('right')" onmouseup="teleopStop()" ontouchstart="teleopStart('right')" ontouchend="teleopStop()">►<br><small>D</small></button>
+                            <div></div>
+                            <button class="teleop-btn" onmousedown="teleopStart('backward')" onmouseup="teleopStop()" ontouchstart="teleopStart('backward')" ontouchend="teleopStop()">▼<br><small>S</small></button>
+                            <div></div>
+                        </div>
+                        <div class="speed-control">
+                            <span>Speed:</span>
+                            <input type="range" class="speed-slider" id="speedSlider" min="0.1" max="1.0" step="0.1" value="0.5">
+                            <span id="speedValue">0.5</span>
+                        </div>
+                        <button class="btn btn-secondary" style="width:100%;margin-top:10px;" onclick="toggleJoystick()">Toggle Joystick</button>
+                        <div class="joystick" id="joystick" style="display:none;margin-top:15px;width:200px;height:200px;background:linear-gradient(135deg,#f0f0f0,#e0e0e0);border-radius:50%;position:relative;border:3px solid #4A90E2;">
+                            <div id="joystickHandle" style="width:80px;height:80px;background:linear-gradient(135deg,#4A90E2,#87CEEB);border-radius:50%;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);cursor:move;box-shadow:0 4px 15px rgba(74,144,226,0.4);"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="control-section">
+                    <h3>📊 Robot Status</h3>
+                    <div class="debug-info">
+                        <div><strong>Position:</strong></div>
+                        <div>X: <span id="posX">0.00</span> m</div>
+                        <div>Y: <span id="posY">0.00</span> m</div>
+                        <div>θ: <span id="posTheta">0.00</span>°</div>
+                        <div style="margin-top:8px;"><strong>Velocity:</strong></div>
+                        <div>Linear: <span id="velLinear">0.00</span> m/s</div>
+                        <div>Angular: <span id="velAngular">0.00</span> rad/s</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Center Panel -->
+            <div class="center-panel">
+                <div class="map-canvas-container">
+                    <div class="top-controls">
+                        <div class="control-group" style="flex:1;min-width:300px;">
+                            <label style="margin-right:10px;color:var(--text-primary);font-weight:600;">🗺️ Map:</label>
+                            <select id="mapSelectorDropdown" onchange="selectMapFromDropdown()" style="padding:8px 12px;border-radius:6px;border:1px solid var(--border-color);background:var(--control-bg);color:var(--text-primary);font-size:14px;min-width:200px;">
+                                <option value="">Loading maps...</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <button class="btn btn-primary" onclick="resetView()">🔄 Reset View</button>
+                            <button class="btn btn-secondary" onclick="toggleLaserScan()" id="laserToggleBtn">👁️ Hide Laser</button>
+                            <button class="btn btn-danger" id="navCancelBtn" onclick="cancelNavigation()" disabled>⛔ Cancel Nav</button>
+                        </div>
+                    </div>
+                    <canvas id="mapCanvas"></canvas>
+                </div>
+            </div>
+
+            <!-- Right Panel -->
+            <div class="right-panel">
+                <div class="control-section">
+                    <h3>🗺️ SLAM Mapping</h3>
+                    <div class="slam-controls">
+                        <button class="btn btn-success" id="startSlamBtn" onclick="startSlam()">Start SLAM</button>
+                        <button class="btn btn-danger" id="stopSlamBtn" onclick="stopSlam()" disabled>Stop SLAM</button>
+                        <button class="btn btn-primary" id="saveMapBtn" onclick="showSaveMapModal()" disabled>Save Map</button>
+                    </div>
+                    <div id="slamStatus" class="info-badge success" style="display:none;margin-top:10px;">
+                        <span class="status-indicator status-active"></span>SLAM Active
+                    </div>
+
+                    <!-- Robot Cards -->
+                    <div style="margin-top:16px;display:flex;flex-direction:column;gap:12px;">
+
+                        <!-- bumpy7 card -->
+                        <div class="robot-card" id="card-bumpy7">
+                            <div class="robot-card-header">
+                                <span class="robot-card-name">🤖 bumpy7</span>
+                                <span class="robot-card-role role-unknown" id="role-bumpy7">⏳ --</span>
+                            </div>
+                            <div class="robot-card-body">
+                                <div class="robot-card-row">
+                                    <span>🔋 Battery</span>
+                                    <span id="batt-bumpy7">--%</span>
+                                </div>
+                                <div class="mini-bar-wrap"><div class="mini-bar" id="battbar-bumpy7" style="width:0%;background:#28a745;"></div></div>
+                                <div class="robot-card-row" style="margin-top:8px;">
+                                    <span>📡 Confidence</span>
+                                    <span id="conf-bumpy7">--</span>
+                                </div>
+                                <div class="mini-bar-wrap"><div class="mini-bar" id="confbar-bumpy7" style="width:0%;background:#4A90E2;"></div></div>
+                            </div>
+                        </div>
+
+                        <!-- bumpy5 card -->
+                        <div class="robot-card" id="card-bumpy5">
+                            <div class="robot-card-header">
+                                <span class="robot-card-name">🤖 bumpy5</span>
+                                <span class="robot-card-role role-unknown" id="role-bumpy5">⏳ --</span>
+                            </div>
+                            <div class="robot-card-body">
+                                <div class="robot-card-row">
+                                    <span>🔋 Battery</span>
+                                    <span id="batt-bumpy5">--%</span>
+                                </div>
+                                <div class="mini-bar-wrap"><div class="mini-bar" id="battbar-bumpy5" style="width:0%;background:#28a745;"></div></div>
+                                <div class="robot-card-row" style="margin-top:8px;">
+                                    <span>📡 Confidence</span>
+                                    <span id="conf-bumpy5">--</span>
+                                </div>
+                                <div class="mini-bar-wrap"><div class="mini-bar" id="confbar-bumpy5" style="width:0%;background:#4A90E2;"></div></div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>📍 Waypoint Navigation</h3>
+                    <div class="waypoint-actions-grid">
+                        <button class="btn btn-primary" onclick="addWaypointMode()">➕ Add Waypoint</button>
+                        <button class="btn btn-success" id="startNavBtn" onclick="startWaypointNavigation()" disabled>▶️ Start Nav</button>
+                        <button class="btn btn-secondary" onclick="loadWaypointsFromFile()">📂 Load</button>
+                        <button class="btn btn-secondary" onclick="saveWaypointsToFile()">💾 Save</button>
+                        <button class="btn btn-danger" onclick="clearAllWaypoints()">🗑️ Clear All</button>
+                    </div>
+                    <div class="waypoint-list-header"><strong>Waypoints (<span id="waypointCount">0</span>)</strong></div>
+                    <div class="waypoint-list" id="waypointList"><div class="info-badge warning">No waypoints added</div></div>
+                    <div id="navStatusInfo" class="info-badge" style="display:none;margin-top:10px;">
+                        <span class="status-indicator"></span><span id="navStatusText">Ready</span>
+                    </div>
+                </div>
+
+                <!-- Camera Feed — ROS topic subscriber -->
+                <div class="control-section">
+                    <h3>
+                        📹 Camera Feed
+                        <span class="camera-badge waiting" id="cameraBadge">Disabled</span>
+                    </h3>
+                    <div class="camera-topic-info" id="cameraTopicInfo">Topic: loading...</div>
+                    
+                    <!-- ✨ Camera Toggle Button -->
+                    <div style="margin:10px 0;display:flex;align-items:center;justify-content:space-between;background:var(--control-bg);padding:10px;border-radius:8px;">
+                        <span style="font-weight:600;">Enable Camera:</span>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="cameraToggle" onchange="toggleCameraFeed(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    
+                    <div style="text-align:center;margin-top:10px;">
+                        <img id="cameraFeedImg"
+                             src="/video_feed"
+                             style="width:100%;border-radius:8px;border:2px solid var(--border-color);display:none;"
+                             alt="Camera Feed"
+                             onload="onCameraLoad()"
+                             onerror="onCameraError()">
+                        <div class="camera-no-feed" id="cameraNoFeed">
+                            📷 Camera Disabled<br>
+                            <span style="font-size:11px;" id="cameraNoFeedTopic"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="saveMapModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">Save Current Map</div>
+            <input type="text" id="mapNameInput" class="modal-input" placeholder="Enter map name">
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="hideSaveMapModal()">Cancel</button>
+                <button class="btn btn-success" onclick="saveMap()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const CORRECT_USERNAME = 'bumpy7';
+        const CORRECT_PASSWORD = 'bumpykkr';
+        const UPDATE_INTERVAL = 50;
+
+        let currentMap=null, mapImage=null, mapMetadata=null;
+        let robotPose={x:0,y:0,theta:0}, laserScan=[], showLaser=true;
+        let waypoints=[], addingWaypoint=false, isNavigating=false;
+        let lastRobotPos={x:0,y:0,theta:0}, robotMoving=false;
+        let currentTheme='light';
+
+        const canvas = document.getElementById('mapCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // ── Camera ──────────────────────────────────────────────────────
+        let cameraStreamActive = false;
+
+        function onCameraLoad() {
+            cameraStreamActive = true;
+            document.getElementById('cameraBadge').textContent = 'Live';
+            document.getElementById('cameraBadge').className = 'camera-badge active';
+            document.getElementById('cameraFeedImg').style.display = 'block';
+            document.getElementById('cameraNoFeed').style.display = 'none';
+        }
+
+        function onCameraError() {
+            cameraStreamActive = false;
+            document.getElementById('cameraBadge').textContent = 'No Feed';
+            document.getElementById('cameraBadge').className = 'camera-badge inactive';
+            document.getElementById('cameraFeedImg').style.display = 'none';
+            document.getElementById('cameraNoFeed').style.display = 'block';
+            // Only retry if camera is enabled
+            const toggle = document.getElementById('cameraToggle');
+            if (toggle && toggle.checked) {
+                setTimeout(() => {
+                    const img = document.getElementById('cameraFeedImg');
+                    img.src = '/video_feed?' + Date.now();
+                }, 3000);
+            }
+        }
+
+        // ✨ Toggle Camera Function
+        async function toggleCameraFeed(enabled) {
+            try {
+                const res = await fetch('/api/camera/toggle', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({enabled: enabled})
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    const badge = document.getElementById('cameraBadge');
+                    const img = document.getElementById('cameraFeedImg');
+                    const noFeed = document.getElementById('cameraNoFeed');
+                    
+                    if (enabled) {
+                        badge.textContent = 'Enabling...';
+                        badge.className = 'camera-badge waiting';
+                        // Start camera feed
+                        img.src = '/video_feed?' + Date.now();
+                        noFeed.innerHTML = '⏳ Waiting for camera feed...';
+                    } else {
+                        badge.textContent = 'Disabled';
+                        badge.className = 'camera-badge inactive';
+                        img.style.display = 'none';
+                        img.src = '';
+                        noFeed.style.display = 'block';
+                        noFeed.innerHTML = '📷 Camera Disabled<br><small>Enable camera using the toggle above</small>';
+                    }
+                }
+            } catch(e) {
+                console.error('Error toggling camera:', e);
+            }
+        }
+
+        async function loadCameraInfo() {
+            try {
+                const res = await fetch('/api/camera/info');
+                const data = await res.json();
+                document.getElementById('cameraTopicInfo').textContent = 'Topic: ' + data.topic;
+                document.getElementById('cameraNoFeedTopic').textContent = data.topic;
+                
+                // Update toggle to match server state
+                const toggle = document.getElementById('cameraToggle');
+                if (toggle && toggle.checked !== data.enabled) {
+                    toggle.checked = data.enabled;
+                }
+                
+                if (data.enabled && data.receiving) {
+                    document.getElementById('cameraBadge').textContent = 'Live';
+                    document.getElementById('cameraBadge').className = 'camera-badge active';
+                } else if (data.enabled && !data.receiving) {
+                    document.getElementById('cameraBadge').textContent = 'Waiting...';
+                    document.getElementById('cameraBadge').className = 'camera-badge waiting';
+                } else {
+                    document.getElementById('cameraBadge').textContent = 'Disabled';
+                    document.getElementById('cameraBadge').className = 'camera-badge inactive';
+                }
+            } catch(e) {}
+        }
+
+        // Poll camera status every 2 seconds
+        setInterval(loadCameraInfo, 2000);
+        // ────────────────────────────────────────────────────────────────
+
+        function toggleTheme() {
+            currentTheme = currentTheme === 'light' ? 'dark' : 'light';
+            document.documentElement.setAttribute('data-theme', currentTheme);
+            document.getElementById('themeIcon').textContent = currentTheme==='dark' ? '☀️' : '🌙';
+            document.getElementById('themeText').textContent = currentTheme==='dark' ? 'Light' : 'Dark';
+            localStorage.setItem('theme', currentTheme);
+            draw();
+        }
+        function loadTheme() {
+            const t = localStorage.getItem('theme');
+            if (t) { currentTheme=t; document.documentElement.setAttribute('data-theme',t);
+                document.getElementById('themeIcon').textContent=t==='dark'?'☀️':'🌙';
+                document.getElementById('themeText').textContent=t==='dark'?'Light':'Dark'; }
+        }
+
+        document.getElementById('loginForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            if (document.getElementById('username').value===CORRECT_USERNAME &&
+                document.getElementById('password').value===CORRECT_PASSWORD) {
+                document.getElementById('loginScreen').style.display='none';
+                document.getElementById('dashboard').style.display='block';
+                initDashboard();
+            } else { document.getElementById('loginError').style.display='block'; }
+        });
+        function logout() {
+            document.getElementById('loginScreen').style.display='flex';
+            document.getElementById('dashboard').style.display='none';
+            ['username','password'].forEach(id=>document.getElementById(id).value='');
+        }
+
+        function initDashboard() {
+            loadTheme(); resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+            initJoystick(); loadMaps(); startDataUpdates(); checkSlamStatus(); loadCameraInfo();
+        }
+        function resizeCanvas() {
+            const c=canvas.parentElement, t=c.querySelector('.top-controls');
+            canvas.width=c.clientWidth-40;
+            canvas.height=c.clientHeight-t.clientHeight-40;
+        }
+
+        function initJoystick() {
+            const joystick=document.getElementById('joystick'), handle=document.getElementById('joystickHandle');
+            const speedSlider=document.getElementById('speedSlider');
+            speedSlider.addEventListener('input',e=>document.getElementById('speedValue').textContent=e.target.value);
+            let isDragging=false, jRect=joystick.getBoundingClientRect();
+            handle.addEventListener('mousedown',startDrag); handle.addEventListener('touchstart',startDrag);
+            function startDrag(e){isDragging=true; jRect=joystick.getBoundingClientRect();
+                document.addEventListener('mousemove',drag); document.addEventListener('mouseup',stopDrag);
+                document.addEventListener('touchmove',drag); document.addEventListener('touchend',stopDrag);}
+            function drag(e){
+                if(!isDragging)return;
+                const cx=e.touches?e.touches[0].clientX:e.clientX, cy=e.touches?e.touches[0].clientY:e.clientY;
+                const cx0=jRect.left+jRect.width/2, cy0=jRect.top+jRect.height/2;
+                let dx=cx-cx0, dy=cy-cy0;
+                const maxR=jRect.width/2-40, dist=Math.sqrt(dx*dx+dy*dy);
+                if(dist>maxR){const a=Math.atan2(dy,dx); dx=maxR*Math.cos(a); dy=maxR*Math.sin(a);}
+                handle.style.transform=`translate(calc(-50% + ${dx}px),calc(-50% + ${dy}px))`;
+                const speed=parseFloat(speedSlider.value);
+                const linear=(-dy/maxR)*speed, angular=(-dx/maxR)*speed*2;
+                sendVelocity(linear,angular);
+                document.getElementById('velLinear').textContent=linear.toFixed(2);
+                document.getElementById('velAngular').textContent=angular.toFixed(2);}
+            function stopDrag(){isDragging=false; handle.style.transform='translate(-50%,-50%)';
+                sendVelocity(0,0); document.getElementById('velLinear').textContent='0.00';
+                document.getElementById('velAngular').textContent='0.00';
+                ['mousemove','mouseup','touchmove','touchend'].forEach((ev,i)=>
+                    document.removeEventListener(ev,[drag,stopDrag,drag,stopDrag][i]));}
+        }
+
+        let teleopInterval=null;
+        function teleopStart(dir){
+            const speed=parseFloat(document.getElementById('speedSlider').value);
+            let linear=0,angular=0;
+            if(dir==='forward')linear=speed; else if(dir==='backward')linear=-speed;
+            else if(dir==='left')angular=speed*1.5; else if(dir==='right')angular=-speed*1.5;
+            sendVelocity(linear,angular);
+            document.getElementById('velLinear').textContent=linear.toFixed(2);
+            document.getElementById('velAngular').textContent=angular.toFixed(2);
+            teleopInterval=setInterval(()=>sendVelocity(linear,angular),100);}
+        function teleopStop(){if(teleopInterval){clearInterval(teleopInterval);teleopInterval=null;}
+            sendVelocity(0,0); document.getElementById('velLinear').textContent='0.00';
+            document.getElementById('velAngular').textContent='0.00';}
+        function emergencyStop(){teleopStop();sendVelocity(0,0);}
+        function toggleJoystick(){const j=document.getElementById('joystick'); j.style.display=j.style.display==='none'?'block':'none';}
+
+        document.addEventListener('keydown',e=>{
+            if(document.activeElement.tagName==='INPUT')return;
+            const k=e.key.toLowerCase();
+            if(['w','arrowup'].includes(k)){e.preventDefault();if(!teleopInterval)teleopStart('forward');}
+            else if(['s','arrowdown'].includes(k)){e.preventDefault();if(!teleopInterval)teleopStart('backward');}
+            else if(['a','arrowleft'].includes(k)){e.preventDefault();if(!teleopInterval)teleopStart('left');}
+            else if(['d','arrowright'].includes(k)){e.preventDefault();if(!teleopInterval)teleopStart('right');}
+            else if(k===' '){e.preventDefault();emergencyStop();}});
+        document.addEventListener('keyup',e=>{
+            if(document.activeElement.tagName==='INPUT')return;
+            if(['w','s','a','d','arrowup','arrowdown','arrowleft','arrowright'].includes(e.key.toLowerCase()))
+                {e.preventDefault();teleopStop();}});
+
+        function sendVelocity(linear,angular){
+            fetch('/api/cmd_vel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({linear,angular})});}
+
+        let currentRole = 'leader';
+        function setRole(role){
+            currentRole = role;
+            document.getElementById('roleLeaderBtn').classList.toggle('role-active', role==='leader');
+            document.getElementById('roleFollowerBtn').classList.toggle('role-active', role==='follower');
+            document.getElementById('roleStatusText').textContent = role.charAt(0).toUpperCase()+role.slice(1);
+            const badge = document.getElementById('roleStatus');
+            badge.className = 'info-badge ' + (role==='leader' ? 'success' : 'warning');
+        }
+
+        async function loadMaps(){
+            try{const r=await fetch('/api/maps'),data=await r.json();
+                const dd=document.getElementById('mapSelectorDropdown'); dd.innerHTML='';
+                if(!data.maps.length){dd.innerHTML='<option value="">No maps available</option>';return;}
+                data.maps.forEach((m,i)=>{const o=document.createElement('option');
+                    o.value=m.name; o.textContent=`${m.name} (${m.created})`; if(!i)o.selected=true; dd.appendChild(o);});
+                if(data.maps.length)loadMap(data.maps[0].name);}
+            catch(e){console.error('Error loading maps:',e);}}
+
+        function selectMapFromDropdown(){const v=document.getElementById('mapSelectorDropdown').value; if(v)loadMap(v);}
+
+        async function loadMap(mapName){
+            try{currentMap=mapName;
+                const dd=document.getElementById('mapSelectorDropdown'); if(dd)dd.value=mapName;
+                const img=new Image(); img.onload=()=>{mapImage=img;}; img.src=`/api/map/${mapName}?t=${Date.now()}`;
+                const wr=await fetch(`/api/waypoints/${mapName}`),wd=await wr.json();
+                waypoints=wd.waypoints||[]; updateWaypointList();}
+            catch(e){console.error('Error loading map:',e);}}
+
+        function startDataUpdates(){
+            setInterval(async()=>{
+                try{const r=await fetch('/api/data'),data=await r.json();
+                    const dx=data.robot_pose.x-lastRobotPos.x, dy=data.robot_pose.y-lastRobotPos.y;
+                    robotMoving=(Math.abs(dx)>0.001||Math.abs(dy)>0.001||Math.abs(data.robot_pose.theta-lastRobotPos.theta)>0.01);
+                    lastRobotPos={...data.robot_pose}; robotPose=data.robot_pose;
+                    laserScan=data.laser_scan||[]; mapMetadata=data.map_metadata;
+                    document.getElementById('posX').textContent=robotPose.x.toFixed(2);
+                    document.getElementById('posY').textContent=robotPose.y.toFixed(2);
+                    document.getElementById('posTheta').textContent=(robotPose.theta*180/Math.PI).toFixed(1);
+
+                    // ── bumpy7 card ──────────────────────────────────────
+                    const batt=data.battery_percentage;
+                    if(batt!=null){
+                        document.getElementById('batteryValue') && (document.getElementById('batteryValue').textContent=batt.toFixed(1));
+                        document.getElementById('batt-bumpy7').textContent=batt.toFixed(1)+'%';
+                        const b7bar=document.getElementById('battbar-bumpy7');
+                        b7bar.style.width=Math.min(100,Math.max(0,batt))+'%';
+                        b7bar.style.background=batt>50?'#28a745':batt>20?'#ffc107':'#dc3545';
+                    }
+                    const conf=data.slam_confidence;
+                    if(conf!=null){
+                        document.getElementById('slamConfidenceValue') && (document.getElementById('slamConfidenceValue').textContent=conf.toFixed(3));
+                        document.getElementById('conf-bumpy7').textContent=conf.toFixed(3);
+                        document.getElementById('confbar-bumpy7').style.width=Math.min(100,Math.max(0,conf*100))+'%';
+                    }
+
+                    // ── bumpy5 card ──────────────────────────────────────
+                    const b5=data.b5_battery;
+                    if(b5!=null){
+                        document.getElementById('batt-bumpy5').textContent=b5.toFixed(1)+'%';
+                        const b5bar=document.getElementById('battbar-bumpy5');
+                        b5bar.style.width=Math.min(100,Math.max(0,b5))+'%';
+                        b5bar.style.background=b5>50?'#28a745':b5>20?'#ffc107':'#dc3545';
+                    }
+                    const c5=data.b5_confidence;
+                    if(c5!=null){
+                        document.getElementById('conf-bumpy5').textContent=c5.toFixed(3);
+                        document.getElementById('confbar-bumpy5').style.width=Math.min(100,Math.max(0,c5*100))+'%';
+                    }
+
+                    // ── Swarm role badges ────────────────────────────────
+                    const leader=data.current_leader;
+                    function setRoleBadge(id, isLeader, received){
+                        const el=document.getElementById(id);
+                        if(!received){ el.textContent='⏳ --'; el.className='robot-card-role role-unknown'; return; }
+                        if(isLeader){ el.textContent='👑 Leader'; el.className='robot-card-role role-leader'; }
+                        else { el.textContent='🤝 Follower'; el.className='robot-card-role role-follower'; }
+                    }
+                    const hasLeader = leader && leader !== 'null';
+                    setRoleBadge('role-bumpy7', leader==='bumpy7', hasLeader);
+                    setRoleBadge('role-bumpy5', leader==='bumpy5', hasLeader);
+
+                    updateConnectionStatus(true); draw();}
+                catch(e){updateConnectionStatus(false);}},UPDATE_INTERVAL);
+            setInterval(checkNavigationStatus,500);}
+
+        function updateConnectionStatus(ok){
+            const s=document.getElementById('connectionStatus');
+            s.querySelector('.status-indicator').className='status-indicator '+(ok?'status-active':'status-idle');
+            s.querySelector('span:last-child').textContent=ok?'Connected':'Disconnected';}
+
+        function draw(){
+            const isDark=currentTheme==='dark';
+            ctx.clearRect(0,0,canvas.width,canvas.height);
+            if(!mapImage||!mapMetadata){
+                ctx.fillStyle=isDark?'#1a1a1a':'#f0f0f0'; ctx.fillRect(0,0,canvas.width,canvas.height);
+                ctx.fillStyle=isDark?'#888':'#999'; ctx.font='20px Arial'; ctx.textAlign='center';
+                ctx.fillText('No map loaded',canvas.width/2,canvas.height/2); return;}
+            const scale=Math.min(canvas.width/mapImage.width,canvas.height/mapImage.height)*0.9;
+            const ox=(canvas.width-mapImage.width*scale)/2, oy=(canvas.height-mapImage.height*scale)/2;
+            ctx.save(); ctx.translate(ox,oy); ctx.scale(scale,scale); ctx.drawImage(mapImage,0,0); ctx.restore();
+            function w2c(x,y){return{x:((x-mapMetadata.origin[0])/mapMetadata.resolution)*scale+ox,
+                y:(mapImage.height-(y-mapMetadata.origin[1])/mapMetadata.resolution)*scale+oy};}
+            if(showLaser&&laserScan.length){ctx.fillStyle='rgba(255,0,0,0.3)';
+                laserScan.forEach(p=>{const c=w2c(p.x,p.y); ctx.beginPath(); ctx.arc(c.x,c.y,2,0,Math.PI*2); ctx.fill();});}
+            waypoints.forEach((wp,i)=>{const c=w2c(wp.x,wp.y);
+                ctx.shadowColor='rgba(255,165,0,0.8)'; ctx.shadowBlur=10;
+                ctx.fillStyle='#FFA500'; ctx.strokeStyle='#000'; ctx.lineWidth=3;
+                ctx.beginPath(); ctx.arc(c.x,c.y,10,0,Math.PI*2); ctx.fill(); ctx.stroke();
+                ctx.shadowBlur=0; ctx.fillStyle='#000'; ctx.strokeStyle='#FFF'; ctx.lineWidth=3;
+                ctx.font='bold 14px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
+                ctx.strokeText(i+1,c.x,c.y); ctx.fillText(i+1,c.x,c.y);});
+            const rc=w2c(robotPose.x,robotPose.y);
+            ctx.save(); ctx.translate(rc.x,rc.y); ctx.rotate(robotPose.theta);
+            const rs=22;
+            ctx.shadowColor=robotMoving?'rgba(74,144,226,0.9)':'rgba(135,206,235,0.7)'; ctx.shadowBlur=20;
+            ctx.strokeStyle='#000'; ctx.lineWidth=4; ctx.beginPath(); ctx.arc(0,0,rs,0,Math.PI*2); ctx.stroke();
+            ctx.shadowBlur=0; ctx.fillStyle=robotMoving?'#4A90E2':'#87CEEB'; ctx.strokeStyle='#000'; ctx.lineWidth=3;
+            ctx.beginPath(); ctx.arc(0,0,rs,0,Math.PI*2); ctx.fill(); ctx.stroke();
+            ctx.strokeStyle='#000'; ctx.lineWidth=2; ctx.fillStyle='#FFF';
+            ctx.beginPath(); ctx.moveTo(rs*.7,0); ctx.lineTo(-rs*.3,rs*.5); ctx.lineTo(-rs*.3,-rs*.5);
+            ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();}
+
+        function toggleLaserScan(){showLaser=!showLaser;
+            document.getElementById('laserToggleBtn').textContent=showLaser?'👁️ Hide Laser':'👁️‍🗨️ Show Laser';}
+        function resetView(){resizeCanvas();}
+
+        function updateWaypointList(){
+            const list=document.getElementById('waypointList'), count=document.getElementById('waypointCount');
+            count.textContent=waypoints.length;
+            document.getElementById('startNavBtn').disabled=!waypoints.length;
+            if(!waypoints.length){list.innerHTML='<div class="info-badge warning">No waypoints added</div>';return;}
+            list.innerHTML='';
+            waypoints.forEach((wp,i)=>{const d=document.createElement('div'); d.className='waypoint-item';
+                d.innerHTML=`<span><strong>WP${i+1}</strong> (${wp.x.toFixed(2)}, ${wp.y.toFixed(2)})</span>
+                    <div class="waypoint-actions">
+                        <button class="icon-btn btn-primary" onclick="navigateToWaypoint(${i})">🎯</button>
+                        <button class="icon-btn btn-danger" onclick="deleteWaypoint(${i})">✕</button>
+                    </div>`; list.appendChild(d);});}
+
+        function addWaypointMode(){addingWaypoint=true; updateNavStatus('Click on map to add waypoint','warning');}
+        canvas.addEventListener('click',e=>{
+            if(!addingWaypoint||!mapImage||!mapMetadata)return;
+            const rect=canvas.getBoundingClientRect();
+            const scale=Math.min(canvas.width/mapImage.width,canvas.height/mapImage.height)*0.9;
+            const ox=(canvas.width-mapImage.width*scale)/2, oy=(canvas.height-mapImage.height*scale)/2;
+            const mx=(e.clientX-rect.left-ox)/scale, my=(e.clientY-rect.top-oy)/scale;
+            const wx=mx*mapMetadata.resolution+mapMetadata.origin[0];
+            const wy=(mapImage.height-my)*mapMetadata.resolution+mapMetadata.origin[1];
+            waypoints.push({x:wx,y:wy,theta:0}); saveWaypoints(); updateWaypointList();
+            updateNavStatus(`Waypoint ${waypoints.length} added`,'success'); addingWaypoint=false;});
+
+        async function saveWaypoints(){if(!currentMap)return;
+            await fetch('/api/waypoints/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({map_name:currentMap,waypoints})});}
+        function deleteWaypoint(i){waypoints.splice(i,1); saveWaypoints(); updateWaypointList();}
+        async function navigateToWaypoint(i){const wp=waypoints[i]; updateNavStatus(`Navigating to WP${i+1}...`,'active');
+            await fetch('/api/navigate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:wp.x,y:wp.y,theta:wp.theta})});}
+        let currentWaypointIndex=0;
+        async function startWaypointNavigation(){
+            if(!waypoints.length){alert('No waypoints!');return;}
+            currentWaypointIndex=0; updateNavStatus(`Starting (${waypoints.length} waypoints)`,'active'); navigateToNextWaypoint();}
+        async function navigateToNextWaypoint(){
+            if(currentWaypointIndex>=waypoints.length){updateNavStatus('Navigation completed! ✅','success');return;}
+            const wp=waypoints[currentWaypointIndex];
+            updateNavStatus(`Going to WP${currentWaypointIndex+1} of ${waypoints.length}`,'active');
+            await fetch('/api/navigate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:wp.x,y:wp.y,theta:wp.theta})});
+            currentWaypointIndex++;}
+        function clearAllWaypoints(){
+            if(!waypoints.length)return;
+            if(confirm(`Delete all ${waypoints.length} waypoints?`)){waypoints=[];saveWaypoints();updateWaypointList();}}
+        function saveWaypointsToFile(){if(!waypoints.length){alert('No waypoints!');return;} saveWaypoints(); updateNavStatus(`${waypoints.length} waypoints saved`,'success');}
+        async function loadWaypointsFromFile(){
+            if(!currentMap){alert('Select a map first!');return;}
+            try{const r=await fetch(`/api/waypoints/${currentMap}`),d=await r.json();
+                if(d.waypoints&&d.waypoints.length){waypoints=d.waypoints;updateWaypointList();updateNavStatus(`${waypoints.length} waypoints loaded`,'success');}
+                else alert('No saved waypoints for this map');}
+            catch(e){alert('Error: '+e.message);}}
+        function updateNavStatus(msg,type='idle'){
+            const div=document.getElementById('navStatusInfo'), span=document.getElementById('navStatusText'), ind=div.querySelector('.status-indicator');
+            div.style.display=type==='idle'?'none':'flex'; div.style.alignItems='center'; div.style.gap='8px';
+            span.textContent=msg; div.classList.remove('info-badge','success','warning'); ind.classList.remove('status-active','status-idle');
+            if(type==='active'){div.classList.add('info-badge');div.style.background='#d1ecf1';div.style.color='#0c5460';ind.classList.add('status-active');}
+            else if(type==='success'){div.classList.add('info-badge','success');ind.style.background='#28a745';}
+            else if(type==='warning'){div.classList.add('info-badge','warning');ind.style.background='#ffc107';}}
+        async function checkNavigationStatus(){
+            try{const r=await fetch('/api/navigate/status'),d=await r.json();
+                isNavigating=d.status==='active'; document.getElementById('navCancelBtn').disabled=!isNavigating;}catch(e){}}
+        async function cancelNavigation(){await fetch('/api/navigate/cancel',{method:'POST'});}
+        async function checkSlamStatus(){const r=await fetch('/api/slam/status'),d=await r.json(); updateSlamUI(d.running); setTimeout(checkSlamStatus,2000);}
+        async function startSlam(){const r=await fetch('/api/slam/start',{method:'POST'}),d=await r.json(); if(d.success)updateSlamUI(true); else alert('Failed: '+(d.error||'?'));}
+        async function stopSlam(){const r=await fetch('/api/slam/stop',{method:'POST'}),d=await r.json(); if(d.success)updateSlamUI(false);}
+        function updateSlamUI(running){
+            document.getElementById('startSlamBtn').disabled=running;
+            document.getElementById('stopSlamBtn').disabled=!running;
+            document.getElementById('saveMapBtn').disabled=!running;
+            document.getElementById('slamStatus').style.display=running?'block':'none';}
+        function showSaveMapModal(){document.getElementById('saveMapModal').style.display='block';}
+        function hideSaveMapModal(){document.getElementById('saveMapModal').style.display='none'; document.getElementById('mapNameInput').value='';}
+        async function saveMap(){
+            const name=document.getElementById('mapNameInput').value.trim();
+            if(!name){alert('Enter a map name');return;}
+            const r=await fetch('/api/map/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+            const d=await r.json();
+            if(d.success){alert('Map saved!');hideSaveMapModal();loadMaps();}else alert('Failed: '+(d.error||'?'));}
+        window.onclick=e=>{if(e.target===document.getElementById('saveMapModal'))hideSaveMapModal();};
+    </script>
+</body>
+</html>
+"""
+
+
+# ── ROS2 Node ──────────────────────────────────────────────────────────────
+
+class WebNode(Node):
+    def __init__(self):
+        super().__init__('web_interface_node')
+
+        self.bridge = CvBridge()
+
+        # ── Publishers ──
+        self.cmd_vel_pub = self.create_publisher(Twist, CMD_VEL_TOPIC, 10)
+        self.initial_pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
+        
+        # ── NEW: Action client for Nav2 (replaces goal_pub) ──
+        self.nav_action_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.get_logger().info('⏳ Waiting for Nav2 action server...')
+        if self.nav_action_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().info('✅ Nav2 action server connected!')
+        else:
+            self.get_logger().warn('⚠️  Nav2 action server not available yet (will retry)')
+
+        # ── Subscribers ──
+        self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.laser_callback, 10)
+
+        # Camera subscriber — subscribes to CAMERA_TOPIC and keeps the latest JPEG
+        self.latest_frame_jpeg: bytes | None = None
+        self.camera_receiving: bool = False
+        self.camera_enabled: bool = False  # ✨ Camera starts DISABLED by default - toggle to enable
+        self._frame_lock = threading.Lock()
+        self.camera_sub = self.create_subscription(
+            RosImage, CAMERA_TOPIC, self.camera_callback, 1)
+
+        # ── Battery & SLAM confidence subscribers (bumpy7) ──
+        self.battery_sub = self.create_subscription(
+            Float32, '/battery_percentage', self.battery_callback, 10)
+        self.confidence_sub = self.create_subscription(
+            Float32, '/confidence', self.confidence_callback, 10)
+
+        # ── bumpy5 subscribers ──
+        self.b5_battery_sub = self.create_subscription(
+            Float32, '/bumpy5/battery_percentage', self.b5_battery_callback, 10)
+        self.b5_confidence_sub = self.create_subscription(
+            Float32, '/bumpy5/confidence', self.b5_confidence_callback, 10)
+
+        # ── Leader election subscriber ──
+        self.leader_sub = self.create_subscription(
+            String, '/leader_election_node', self.leader_callback, 10)
+
+        # ── State ──
+        self.robot_pose = {'x': 0.0, 'y': 0.0, 'theta': 0.0}
+        self.laser_scan = []
+        self.map_metadata = None
+        self.navigation_active = False
+        self.current_goal_handle = None
+        self.battery_percentage = None
+        self.slam_confidence = None
+        self.current_leader = None
+        self.robot_role = 'unknown'
+        # bumpy5 state
+        self.b5_battery = None
+        self.b5_confidence = None
+
+        self.get_logger().info(f'🚀 Web Interface Node started — camera topic: {CAMERA_TOPIC}')
+
+    # ── Camera callback ────────────────────────────────────────────────────
+    def camera_callback(self, msg: RosImage):
+        """Convert incoming ROS image to JPEG and store it for the MJPEG stream."""
+        # ✨ Only process camera if enabled
+        if not self.camera_enabled:
+            with self._frame_lock:
+                self.camera_receiving = False
+                self.latest_frame_jpeg = None
+            return
+        
+        try:
+            # Support both raw bgr8/rgb8 and compressed-style mono8
+            encoding = msg.encoding.lower()
+            if encoding in ('rgb8', 'bgr8', 'mono8', '8uc1', '8uc3'):
+                frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            else:
+                # Fall back — try bgr8, if it fails try passthrough
+                try:
+                    frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+                except Exception:
+                    frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+
+            ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ret:
+                with self._frame_lock:
+                    self.latest_frame_jpeg = buf.tobytes()
+                    self.camera_receiving = True
+        except Exception as e:
+            self.get_logger().warn(f'Camera frame conversion error: {e}', throttle_duration_sec=5.0)
+
+    def get_latest_jpeg(self):
+        """Return latest JPEG frame only if camera is enabled"""
+        with self._frame_lock:
+            # Return None if camera is disabled
+            if not self.camera_enabled:
+                return None
+            return self.latest_frame_jpeg
+
+    # ── NEW: Navigation using Nav2 action ──────────────────────────────────
+    def navigate_to_pose(self, x, y, theta=0):
+        """Send navigation goal to Nav2 using action interface"""
+        try:
+            if not self.nav_action_client.server_is_ready():
+                self.get_logger().error('❌ Nav2 action server not available!')
+                # Try to reconnect
+                if not self.nav_action_client.wait_for_server(timeout_sec=2.0):
+                    return False
+            
+            # Create goal message
+            goal_msg = NavigateToPose.Goal()
+            goal_msg.pose.header.frame_id = 'map'
+            goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
+            goal_msg.pose.pose.position.x = float(x)
+            goal_msg.pose.pose.position.y = float(y)
+            goal_msg.pose.pose.position.z = 0.0
+            
+            # Convert theta to quaternion
+            qz = math.sin(theta / 2.0)
+            qw = math.cos(theta / 2.0)
+            goal_msg.pose.pose.orientation.z = qz
+            goal_msg.pose.pose.orientation.w = qw
+            
+            self.get_logger().info(f'📍 Sending Nav2 goal: x={x:.2f}, y={y:.2f}, theta={theta:.2f}')
+            
+            # Send goal asynchronously
+            send_goal_future = self.nav_action_client.send_goal_async(
+                goal_msg,
+                feedback_callback=self.navigation_feedback_callback
+            )
+            send_goal_future.add_done_callback(self.goal_response_callback)
+            
+            self.navigation_active = True
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f'Navigation failed: {e}')
+            return False
+
+    def goal_response_callback(self, future):
+        """Called when Nav2 accepts or rejects the goal"""
+        try:
+            goal_handle = future.result()
+            if not goal_handle.accepted:
+                self.get_logger().warning('❌ Goal rejected by Nav2')
+                self.navigation_active = False
+                return
+            
+            self.get_logger().info('✅ Goal accepted by Nav2')
+            self.current_goal_handle = goal_handle
+            
+            # Wait for result
+            result_future = goal_handle.get_result_async()
+            result_future.add_done_callback(self.goal_result_callback)
+        except Exception as e:
+            self.get_logger().error(f'Goal response error: {e}')
+            self.navigation_active = False
+
+    def goal_result_callback(self, future):
+        """Called when navigation completes"""
+        try:
+            result = future.result().result
+            self.get_logger().info(f'✅ Navigation completed')
+            self.navigation_active = False
+            self.current_goal_handle = None
+        except Exception as e:
+            self.get_logger().error(f'Navigation result error: {e}')
+            self.navigation_active = False
+
+    def navigation_feedback_callback(self, feedback_msg):
+        """Called periodically during navigation with progress updates"""
+        # Can log distance remaining, ETA, etc. if needed
+        pass
+
+    def cancel_navigation(self):
+        """Cancel the current navigation goal"""
+        if self.current_goal_handle is not None:
+            self.get_logger().info('🛑 Canceling navigation...')
+            try:
+                cancel_future = self.current_goal_handle.cancel_goal_async()
+                cancel_future.add_done_callback(
+                    lambda future: self.get_logger().info('Navigation canceled')
+                )
+            except Exception as e:
+                self.get_logger().error(f'Cancel error: {e}')
+        self.publish_cmd_vel(0.0, 0.0)
+        self.navigation_active = False
+        return True
+
+    # ── Odometry ───────────────────────────────────────────────────────────
+    def odom_callback(self, msg):
+        self.robot_pose['x'] = msg.pose.pose.position.x
+        self.robot_pose['y'] = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        self.robot_pose['theta'] = math.atan2(
+            2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z))
+
+    # ── Laser scan ─────────────────────────────────────────────────────────
+    def laser_callback(self, msg):
+        self.laser_scan = []
+        step = max(1, len(msg.ranges) // 50)
+        for i in range(0, len(msg.ranges), step):
+            r = msg.ranges[i]
+            if r < msg.range_min or r > msg.range_max or not math.isfinite(r):
+                continue
+            angle = msg.angle_min + i * msg.angle_increment + self.robot_pose['theta']
+            self.laser_scan.append({
+                'x': self.robot_pose['x'] + r * math.cos(angle),
+                'y': self.robot_pose['y'] + r * math.sin(angle)})
+
+    # ── Leader election ────────────────────────────────────────────────────
+    def leader_callback(self, msg: String):
+        self.current_leader = msg.data.strip()
+        self.robot_role = 'leader' if self.current_leader == ROBOT_NAME else 'follower'
+        self.get_logger().info(f'👑 Leader: {self.current_leader} → This robot is {self.robot_role}')
+
+    # ── Battery ────────────────────────────────────────────────────────────
+    def battery_callback(self, msg: Float32):
+        self.battery_percentage = round(float(msg.data), 1)
+
+    # ── SLAM confidence ────────────────────────────────────────────────────
+    def confidence_callback(self, msg: Float32):
+        self.slam_confidence = round(float(msg.data), 3)
+
+    # ── bumpy5 callbacks ───────────────────────────────────────────────────
+    def b5_battery_callback(self, msg: Float32):
+        self.b5_battery = round(float(msg.data), 1)
+
+    def b5_confidence_callback(self, msg: Float32):
+        self.b5_confidence = round(float(msg.data), 3)
+
+    # ── Velocity ───────────────────────────────────────────────────────────
+    def publish_cmd_vel(self, linear, angular):
+        msg = Twist()
+        msg.linear.x = float(linear)
+        msg.angular.z = float(angular)
+        self.cmd_vel_pub.publish(msg)
+
+
+# ── Global node reference ──────────────────────────────────────────────────
+web_node: WebNode | None = None
+
+
+# ── MJPEG stream ───────────────────────────────────────────────────────────
+
+def generate_frames():
+    """Yield MJPEG frames sourced from the ROS image subscriber."""
+    while True:
+        if web_node is None:
+            time.sleep(0.05)
+            continue
+        jpeg = web_node.get_latest_jpeg()
+        if jpeg is None:
+            # No frame yet — send a small placeholder image
+            placeholder = np.zeros((240, 320, 3), dtype=np.uint8)
+            cv2.putText(placeholder, 'Waiting for camera topic...', (20, 120),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (150, 150, 150), 1)
+            cv2.putText(placeholder, CAMERA_TOPIC, (20, 150),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 200, 100), 1)
+            _, buf = cv2.imencode('.jpg', placeholder)
+            jpeg = buf.tobytes()
+            time.sleep(0.5)   # slow down placeholder frames
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n')
+        time.sleep(0.033)     # ~30 fps cap
+
+
+# ── Flask routes ───────────────────────────────────────────────────────────
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/api/camera/info')
+def camera_info():
+    if web_node:
+        receiving = web_node.camera_receiving
+        enabled = web_node.camera_enabled
+        return jsonify({
+            'topic': CAMERA_TOPIC,
+            'receiving': receiving,
+            'enabled': enabled
+        })
+    return jsonify({'topic': CAMERA_TOPIC, 'receiving': False, 'enabled': False})
+
+@app.route('/api/camera/toggle', methods=['POST'])
+def toggle_camera():
+    """Toggle camera on/off"""
+    if web_node:
+        try:
+            data = request.get_json()
+            enabled = data.get('enabled', False)
+            web_node.camera_enabled = enabled
+            
+            # Clear frame if disabling
+            if not enabled:
+                with web_node._frame_lock:
+                    web_node.latest_frame_jpeg = None
+                    web_node.camera_receiving = False
+            
+            return jsonify({
+                'success': True,
+                'enabled': enabled,
+                'message': f'Camera {"enabled" if enabled else "disabled"}'
+            })
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+    return jsonify({'success': False, 'error': 'ROS node not initialized'}), 500
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/data')
+def get_data():
+    if web_node:
+        return jsonify({'robot_pose': web_node.robot_pose,
+                        'laser_scan': web_node.laser_scan[:100],
+                        'map_metadata': web_node.map_metadata,
+                        'battery_percentage': web_node.battery_percentage,
+                        'slam_confidence': web_node.slam_confidence,
+                        'robot_role': web_node.robot_role,
+                        'current_leader': web_node.current_leader,
+                        'b5_battery': web_node.b5_battery,
+                        'b5_confidence': web_node.b5_confidence})
+    return jsonify({'robot_pose': {'x':0,'y':0,'theta':0}, 'laser_scan': [], 'map_metadata': None})
+
+@app.route('/api/cmd_vel', methods=['POST'])
+def cmd_vel():
+    try:
+        data = request.get_json()
+        if web_node:
+            web_node.publish_cmd_vel(float(data.get('linear',0)), float(data.get('angular',0)))
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': 'ROS node not initialized'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/maps')
+def get_maps():
+    return jsonify({'maps': get_available_maps()})
+
+@app.route('/api/map/<map_name>')
+def get_map(map_name):
+    try:
+        map_path = get_map_image_path(map_name)
+        if not map_path or not os.path.exists(map_path):
+            return jsonify({'error': 'Map not found'}), 404
+        if web_node: web_node.map_metadata = load_map_yaml(map_name)
+        if map_path.endswith('.png'):
+            return send_from_directory(os.path.dirname(map_path), os.path.basename(map_path), mimetype='image/png')
+        elif map_path.endswith('.pgm'):
+            png_path = map_path.replace('.pgm', '_temp.png')
+            subprocess.run(['convert', map_path, png_path], check=True)
+            return send_from_directory(os.path.dirname(png_path), os.path.basename(png_path), mimetype='image/png')
+        return jsonify({'error': 'Unsupported format'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/waypoints/<map_name>')
+def get_waypoints_api(map_name):
+    return jsonify({'waypoints': load_waypoints(map_name)})
+
+@app.route('/api/waypoints/save', methods=['POST'])
+def save_waypoints_api():
+    data = request.get_json()
+    return jsonify({'success': save_waypoints(data['map_name'], data['waypoints'])})
+
+@app.route('/api/navigate', methods=['POST'])
+def navigate():
+    data = request.get_json()
+    if web_node:
+        return jsonify({'success': web_node.navigate_to_pose(data['x'], data['y'], data.get('theta',0))})
+    return jsonify({'success': False})
+
+@app.route('/api/navigate/cancel', methods=['POST'])
+def cancel_nav():
+    if web_node: return jsonify({'success': web_node.cancel_navigation()})
+    return jsonify({'success': False})
+
+@app.route('/api/navigate/status')
+def nav_status():
+    if web_node: return jsonify({'status': 'active' if web_node.navigation_active else 'idle'})
+    return jsonify({'status': 'idle'})
+
+@app.route('/api/slam/status')
+def slam_status():
+    return jsonify({'running': slam_running})
+
+@app.route('/api/slam/start', methods=['POST'])
+def start_slam():
+    if slam_running: return jsonify({'success': False, 'error': 'Already running'})
+    return jsonify({'success': start_slam_mapping()})
+
+@app.route('/api/slam/stop', methods=['POST'])
+def stop_slam():
+    if not slam_running: return jsonify({'success': False, 'error': 'Not running'})
+    return jsonify({'success': stop_slam_mapping()})
+
+@app.route('/api/map/save', methods=['POST'])
+def save_map():
+    try:
+        data = request.get_json()
+        name = data.get('name','').strip()
+        if not name: return jsonify({'success': False, 'error': 'Name required'})
+        if not name.replace('_','').replace('-','').isalnum():
+            return jsonify({'success': False, 'error': 'Invalid name'})
+        ok = save_current_map(name)
+        return jsonify({'success': ok, 'map_name': name} if ok else {'success': False, 'error': 'Save failed'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ── Entry point ────────────────────────────────────────────────────────────
+
+def ros_spin():
+    rclpy.spin(web_node)
+
+def main():
+    global web_node
+    os.makedirs(MAP_DIRECTORY, exist_ok=True)
+    os.makedirs(WAYPOINTS_DIRECTORY, exist_ok=True)
+
+    rclpy.init()
+    web_node = WebNode()
+
+    ros_thread = threading.Thread(target=ros_spin, daemon=True)
+    ros_thread.start()
+
+    print("\n" + "="*60)
+    print("🤖 Bumpy7 Web Server")
+    print("="*60)
+    print(f"\n📹 Camera topic  : {CAMERA_TOPIC}")
+    print(f"   (change CAMERA_TOPIC at top of file if needed)")
+    print(f"\n🌐 http://localhost:5000")
+    print(f"🌐 http://{get_local_ip()}:5000")
+    print("🔐 Login: bumpy7 / bumpykkr")
+    print("="*60 + "\n")
+
+    app.run(host='0.0.0.0', port=5000, debug=False)
+
+if __name__ == '__main__':
+    main()
