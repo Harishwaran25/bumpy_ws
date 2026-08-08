@@ -1,6 +1,6 @@
 # 🤖 bumpy_ws — ROS2 Autonomous Mobile Robot Platform
 
-A ROS2-based Autonomous Mobile Robot (AMR) platform supporting **LiDAR-based SLAM, mapping, autonomous navigation, RViz visualization, teleoperation, and multi-robot formation control**.
+A ROS2-based Autonomous Mobile Robot (AMR) platform supporting **LiDAR-based SLAM, sensor fusion (EKF), autonomous navigation, teleoperation, camera/gas sensing, and multi-robot formation control**.
 
 The workspace is developed and tested using **ROS2 Humble on Ubuntu 22.04**.
 
@@ -8,25 +8,22 @@ The workspace is developed and tested using **ROS2 Humble on Ubuntu 22.04**.
 
 # 📌 Overview
 
-`bumpy_ws` is a modular ROS2 workspace developed for an autonomous mobile robot platform.
+`bumpy_ws` is a modular ROS2 workspace built for a differential-drive autonomous mobile robot (bumpy7) and multi-robot experimentation.
 
-The system uses a **2D LiDAR** for environment perception and **Google Cartographer** for SLAM and mapping.
+The system uses a **YDLidar 2D LiDAR** for environment perception, an **EKF-based sensor fusion pipeline**, and supports SLAM, autonomous navigation, and multi-robot formation control.
 
-The workspace also contains:
+The workspace contains:
 
 - Robot bringup
-- LiDAR sensor integration
-- Cartographer SLAM
-- Map saving
-- Autonomous navigation
-- Keyboard teleoperation
-- RViz configurations
-- TF visualization
-- Development utilities
+- Robot description (URDF/xacro) + EKF sensor fusion
+- Low-level firmware (motor control, teleop, tick publishing)
+- Sensor drivers (camera, IMU, gas sensor, OLED, web dashboard, leader election)
+- SLAM (Cartographer)
+- Autonomous navigation (Nav2)
 - Multi-robot formation control
-- Obstacle handling for multi-robot systems
+- YDLidar ROS2 driver + SDK
 
-The architecture is designed to be extendable for future applications such as **multi-robot coordination, swarm robotics, warehouse automation, and autonomous indoor navigation**.
+The architecture is designed to be extendable for **multi-robot coordination, swarm robotics, warehouse automation, and autonomous indoor navigation**.
 
 ---
 
@@ -34,50 +31,53 @@ The architecture is designed to be extendable for future applications such as **
 
 ### 🤖 Autonomous Robot
 
-- ROS2-based robot control
-- LiDAR-based environment perception
-- Robot bringup
+- ROS2-based robot control (`bumpy_bringup`)
+- Differential-drive URDF/xacro description (`bumpy_description`)
+- EKF-based sensor fusion (`ekf.yaml`)
 - TF management
-- Velocity control
-- Autonomous navigation
+- Velocity control via `diff_tf.py` / `motor_control.py`
 
 ### 🗺️ SLAM & Mapping
 
-- Google Cartographer SLAM
+- Google Cartographer SLAM (`bumpy_slam`)
 - Real-time 2D map generation
-- RViz visualization
-- Map saving
-- Saved map support for navigation
+- Map saving (`save_map.launch.py`)
+- Multiple saved maps (`amr_map`, `maze`, `room_map`, `SREC_COE_NEW`)
+- Saved waypoints per map (JSON)
 
-### 🎮 Robot Teleoperation
+### 🧭 Navigation
 
-Keyboard-based manual robot control using:
+- Nav2-based autonomous navigation (`bumpy_navigation`)
+- Configurable params (`nav2_params.yaml`)
 
-```bash
-ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/bumpy7/cmd_vel
-```
+### 📡 Sensors
 
-### 🖥️ Development & Visualization
+- Camera + camera TF publisher
+- IMU node
+- Gas sensor node
+- OLED status display
+- Robot status monitor
+- Web server dashboard (Flask-based)
+- Leader election node (multi-robot)
 
-The repository contains a separate `Bumpy Rviz` directory containing:
+### 🎮 Firmware & Teleoperation
 
-- RViz configurations for multiple robots
-- Mapping visualization
-- Navigation visualization
-- TF frame visualization
-- Development launch files
-- Camera utility
+- Differential-drive tick publisher + motor control
+- Xbox controller teleop config
+- Keyboard teleoperation
 
 ### 🤝 Multi-Robot Coordination
 
-The workspace contains a `formation_control` package for multi-robot coordination.
-
-Current development includes:
+The `formation_control` package contains:
 
 - 2-robot formation control
-- 3-robot formation control
-- Alternative 3-robot formation implementation
-- Obstacle handling
+- 3-robot formation control (two implementations)
+- Obstacle handling for multi-robot formations
+
+### 📟 LiDAR
+
+- Custom `ydlidar_ros2_driver` package (C++ driver, RViz configs)
+- Vendored `YDLidar-SDK` for hardware communication
 
 ---
 
@@ -89,9 +89,10 @@ Current development includes:
 | Middleware | ROS2 Humble |
 | Programming | Python / C++ |
 | SLAM | Google Cartographer |
-| Navigation | ROS2 Navigation Stack |
+| Navigation | ROS2 Navigation Stack (Nav2) |
+| Sensor Fusion | robot_localization (EKF) |
 | Visualization | RViz2 |
-| Environment Perception | 2D LiDAR |
+| Environment Perception | YDLidar 2D LiDAR |
 | Build System | Colcon |
 | Multi-Robot Control | Python |
 | Robot Communication | ROS2 Topics / TF |
@@ -103,67 +104,122 @@ Current development includes:
 ```text
 bumpy_ws/
 │
-├── Bumpy Rviz/
-│   │
-│   ├── bumpy1.rviz
-│   ├── bumpy2.rviz
-│   ├── bumpy3.rviz
-│   ├── bumpy4.rviz
-│   ├── bumpy5.rviz
-│   ├── bumpy6.rviz
-│   ├── bumpy7.rviz
-│   ├── bumpy7 (copy).rviz
-│   ├── tb3.rviz
-│   │
-│   ├── cam.py
-│   ├── robot.launch.py
-│   │
-│   ├── frames_2026-03-20_14.23.28.gv
-│   └── frames_2026-03-20_14.23.28.pdf
-│
 ├── src/
 │   │
-│   ├── bumpy_bringup/
+│   ├── bumpy_bringup/              # Top-level robot bringup
+│   │   ├── bumpy_bringup/
+│   │   ├── launch/
+│   │   │   ├── bringup.launch.py
+│   │   │   └── minimal.launch.py
+│   │   ├── package.xml
+│   │   ├── setup.py
+│   │   └── test/
 │   │
-│   ├── bumpy_sensors/
+│   ├── bumpy_description/          # URDF/xacro + EKF config
+│   │   ├── bumpy_description/
+│   │   ├── config/
+│   │   │   └── ekf.yaml
+│   │   ├── launch/
+│   │   │   └── robot.launch.py
+│   │   ├── urdf/
+│   │   │   ├── bumpy.xacro
+│   │   │   ├── bumpy7.xacro
+│   │   │   └── robot.xacro
+│   │   └── test/
 │   │
-│   ├── bumpy_slam/
+│   ├── bumpy_firmware/             # Low-level motor control & teleop
+│   │   ├── bumpy_firmware/
+│   │   │   ├── diff_tf.py
+│   │   │   ├── motor_control.py
+│   │   │   ├── teleop.py
+│   │   │   └── tick_pub.py
+│   │   ├── launch/
+│   │   │   └── motor_control.launch.py
+│   │   └── test/
+│   │
+│   ├── bumpy_navigation/           # Nav2 autonomous navigation
+│   │   ├── bumpy_navigation/
+│   │   ├── launch/
+│   │   │   └── navigation.launch.py
+│   │   ├── params/
+│   │   │   └── nav2_params.yaml
+│   │   └── test/
+│   │
+│   ├── bumpy_sensors/               # Sensor drivers & dashboard
+│   │   ├── bumpy_sensors/
+│   │   │   ├── camera.py
+│   │   │   ├── camera_tf_pub.py
+│   │   │   ├── gas_sensor_node.py
+│   │   │   ├── imu.py
+│   │   │   ├── leader_ele.py
+│   │   │   ├── oled.py
+│   │   │   ├── robot_status.py
+│   │   │   └── web_server_node.py
+│   │   └── test/
+│   │
+│   ├── bumpy_slam/                 # Cartographer SLAM + maps
+│   │   ├── bumpy_slam/
+│   │   ├── config/
+│   │   │   ├── slam.lua
+│   │   │   └── slam_params.yaml
 │   │   ├── launch/
 │   │   │   ├── slam.launch.py
 │   │   │   ├── cartographer.launch.py
 │   │   │   ├── save_map.launch.py
 │   │   │   └── sllidar_a1_launch.py
-│   │   │
-│   │   ├── config/
 │   │   ├── maps/
+│   │   │   ├── amr_map.pgm / .yaml
+│   │   │   ├── maze.pgm / .yaml
+│   │   │   ├── room_map.pgm / .yaml
+│   │   │   └── SREC_COE_NEW.pgm / .yaml
 │   │   ├── waypoints/
-│   │   ├── bumpy_slam/
-│   │   ├── package.xml
-│   │   ├── setup.py
-│   │   └── setup.cfg
+│   │   │   ├── bumpy_map_waypoints.json
+│   │   │   ├── room_map_waypoints.json
+│   │   │   └── SREC_COE_NEW_waypoints.json
+│   │   └── test/
 │   │
-│   └── formation_control/
-│       └── formation_control/
-│           ├── 2robot.py
-│           ├── 3robot.py
-│           ├── 3robot2.py
-│           ├── obstacle.py
-│           └── __init__.py
+│   ├── formation_control/          # Multi-robot formation control
+│   │   ├── config/
+│   │   │   └── formation_config.yaml
+│   │   ├── formation_control/
+│   │   │   ├── 2robot.py
+│   │   │   ├── 3robot.py
+│   │   │   ├── 3robot2.py
+│   │   │   └── obstacle.py
+│   │   ├── launch/
+│   │   │   └── formation.launch.py
+│   │   └── test/
+│   │
+│   ├── ydlidar_ros2_driver/        # YDLidar ROS2 driver (C++)
+│   │   ├── config/
+│   │   │   └── ydlidar.rviz
+│   │   ├── launch/
+│   │   │   ├── ydlidar_launch.py
+│   │   │   └── ydlidar_launch_view.py
+│   │   ├── params/
+│   │   │   └── *.yaml   (per LiDAR model)
+│   │   └── src/
+│   │       ├── ydlidar_ros2_driver_client.cpp
+│   │       └── ydlidar_ros2_driver_node.cpp
+│   │
+│   └── YDLidar-SDK/                # Vendored LiDAR SDK
+│       ├── core/
+│       ├── src/
+│       ├── python/
+│       └── doc/
 │
 ├── build/        # Ignored
 ├── install/      # Ignored
 └── log/          # Ignored
 ```
 
-> `__pycache__/` and generated `.pyc` files should normally be excluded from Git using `.gitignore`.
+> `__pycache__/`, `.pyc`, and `.bak`/`.backup` files should be excluded from Git via `.gitignore`.
 
 ---
 
 # ⚙️ Installation
 
 ## Prerequisites
-
-Install the following:
 
 - Ubuntu 22.04
 - ROS2 Humble
@@ -172,6 +228,7 @@ Install the following:
 - RViz2
 - Cartographer
 - Navigation2
+- robot_localization (EKF)
 
 Install required ROS2 packages:
 
@@ -183,6 +240,7 @@ ros-humble-cartographer \
 ros-humble-cartographer-ros \
 ros-humble-navigation2 \
 ros-humble-nav2-bringup \
+ros-humble-robot-localization \
 ros-humble-teleop-twist-keyboard \
 ros-humble-rviz2
 ```
@@ -193,11 +251,6 @@ ros-humble-rviz2
 
 ```bash
 git clone https://github.com/rajagopal95/bumpy_ws.git
-```
-
-Move into the workspace:
-
-```bash
 cd bumpy_ws
 ```
 
@@ -205,15 +258,8 @@ cd bumpy_ws
 
 # 🔨 Build the Workspace
 
-Build all ROS2 packages:
-
 ```bash
 colcon build
-```
-
-Source the workspace:
-
-```bash
 source install/setup.bash
 ```
 
@@ -227,29 +273,36 @@ source ~/bumpy_ws/install/setup.bash
 
 # 🤖 Robot Bringup
 
-Start the robot bringup system:
-
 ```bash
 ros2 launch bumpy_bringup bringup.launch.py
 ```
 
-The bringup system is responsible for starting the required robot components such as:
+Bringup starts:
 
-- Robot drivers
-- Sensors
-- TF
-- Robot state
-- Velocity interfaces
+- Robot description (URDF/TF)
+- EKF sensor fusion
+- Motor control / firmware nodes
+- Sensor nodes
+
+For a lightweight bringup (development/testing):
+
+```bash
+ros2 launch bumpy_bringup minimal.launch.py
+```
 
 ---
 
 # 📡 LiDAR
 
-The robot uses a **2D LiDAR** for environment perception.
+The robot uses a **YDLidar 2D LiDAR** for environment perception.
 
-The LiDAR provides range data that is used by the SLAM system to construct a 2D representation of the environment.
+Launch the driver:
 
-The LiDAR launch file is located at:
+```bash
+ros2 launch ydlidar_ros2_driver ydlidar_launch.py
+```
+
+Or via the SLAM package's wrapper:
 
 ```text
 src/bumpy_slam/launch/sllidar_a1_launch.py
@@ -257,34 +310,41 @@ src/bumpy_slam/launch/sllidar_a1_launch.py
 
 ---
 
+# 🧮 Sensor Fusion (EKF)
+
+Odometry and IMU data are fused using `robot_localization`, configured at:
+
+```text
+src/bumpy_description/config/ekf.yaml
+```
+
+This publishes a filtered `odom → base_link` transform used by SLAM and Nav2.
+
+---
+
 # 🗺️ SLAM
 
 The project uses **Google Cartographer** for real-time SLAM.
-
-Start SLAM using:
 
 ```bash
 ros2 launch bumpy_slam slam.launch.py
 ```
 
-This launches the required SLAM components and allows the robot to construct a map while moving through the environment.
+Cartographer parameters:
+
+```text
+src/bumpy_slam/config/slam.lua
+src/bumpy_slam/config/slam_params.yaml
+```
 
 ---
 
 # 🎮 Manual Teleoperation
 
-The robot can be manually controlled using the ROS2 keyboard teleoperation package.
-
-Run:
+Keyboard:
 
 ```bash
-ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/bumpy7/cmd_vel
-```
-
-The velocity commands are published to:
-
-```text
-/bumpy7/cmd_vel
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel
 ```
 
 ## Keyboard Controls
@@ -303,52 +363,37 @@ The velocity commands are published to:
 | `l` | Rotate Right |
 | `k` | Stop |
 
-Additional keys provided by `teleop_twist_keyboard` can be displayed in the terminal when the node starts.
-
 ---
 
 # 💾 Saving a Map
-
-After completing the SLAM process, save the generated map using:
 
 ```bash
 ros2 launch bumpy_slam save_map.launch.py
 ```
 
-The saved map is stored in:
+Saved maps are stored in:
 
 ```text
 src/bumpy_slam/maps/
 ```
 
-A typical saved map contains:
+Each map includes a `.yaml` (metadata) and `.pgm` (occupancy grid image).
+
+Saved waypoints for each map live in:
 
 ```text
-maps/
-├── map_name.yaml
-└── map_name.pgm
+src/bumpy_slam/waypoints/
 ```
-
-### `.yaml`
-
-Contains the map metadata such as:
-
-- Map image
-- Resolution
-- Origin
-- Occupancy thresholds
-
-### `.pgm`
-
-Contains the actual occupancy-grid map image.
 
 ---
 
 # 🧭 Autonomous Navigation
 
-After generating and saving a map, the map can be used for autonomous navigation.
+```bash
+ros2 launch bumpy_navigation navigation.launch.py
+```
 
-The general navigation pipeline is:
+Navigation pipeline:
 
 ```text
                 Saved Map
@@ -372,166 +417,48 @@ The general navigation pipeline is:
                   Robot
 ```
 
-The navigation system uses the map together with sensor data and robot pose information to plan and execute paths.
+Nav2 parameters:
+
+```text
+src/bumpy_navigation/params/nav2_params.yaml
+```
 
 ---
 
-# 🖥️ RViz Development Tools
+# 📷 Sensors & Dashboard
 
-A separate directory named:
+The `bumpy_sensors` package provides:
 
-```text
-Bumpy Rviz/
-```
-
-contains RViz configuration files used during development and testing.
-
-## RViz Configurations
-
-The directory currently contains configurations for multiple robots:
-
-```text
-Bumpy Rviz/
-├── bumpy1.rviz
-├── bumpy2.rviz
-├── bumpy3.rviz
-├── bumpy4.rviz
-├── bumpy5.rviz
-├── bumpy6.rviz
-├── bumpy7.rviz
-├── bumpy7 (copy).rviz
-└── tb3.rviz
-```
-
-These configurations can be loaded into RViz2 to visualize different robot namespaces, sensor data, maps, navigation information, and TF frames.
-
----
-
-# 👁️ Opening RViz2
-
-Start RViz2:
-
-```bash
-rviz2
-```
-
-Then load the required `.rviz` configuration.
-
-For example:
-
-```text
-Bumpy Rviz/bumpy7.rviz
-```
-
-RViz can be used to visualize:
-
-- LiDAR scans
-- Occupancy maps
-- Robot model
-- TF frames
-- Robot pose
-- Navigation paths
-- Goals
-- Costmaps
-- Odometry
-
----
-
-# 🌳 TF Frame Visualization
-
-The `Bumpy Rviz` directory also contains generated TF frame information:
-
-```text
-frames_2026-03-20_14.23.28.gv
-frames_2026-03-20_14.23.28.pdf
-```
-
-These files provide a graphical representation of the robot's TF tree.
-
-A typical AMR TF structure may look like:
-
-```text
-map
- │
- ▼
-odom
- │
- ▼
-base_link
- │
- ├── laser
- │
- └── other sensors
-```
-
-The exact TF tree depends on the robot configuration.
-
----
-
-# 📷 Camera Development Utility
-
-The `Bumpy Rviz` directory also contains:
-
-```text
-cam.py
-```
-
-This script is used as a development utility for camera-related testing.
-
----
-
-# 🚀 Development Launch File
-
-The `Bumpy Rviz` directory contains:
-
-```text
-robot.launch.py
-```
-
-This launch file is used during development/testing of the robot visualization or simulation environment.
+- `camera.py` / `camera_tf_pub.py` — camera driver + TF publishing
+- `imu.py` — IMU data publishing
+- `gas_sensor_node.py` — gas sensor readings
+- `oled.py` — OLED status display
+- `robot_status.py` — robot health/status monitoring
+- `leader_ele.py` — leader election for multi-robot setups
+- `web_server_node.py` — Flask-based web dashboard for monitoring
 
 ---
 
 # 🤝 Multi-Robot Formation Control
 
-The workspace contains a dedicated package:
-
 ```text
 src/formation_control/
 ```
 
-This package contains experimental and development code for **multi-robot coordination and formation control**.
-
-Current implementations include:
+Implementations:
 
 ```text
 formation_control/
-├── 2robot.py
-├── 3robot.py
-├── 3robot2.py
-├── obstacle.py
-└── __init__.py
+├── 2robot.py     # Two-robot formation
+├── 3robot.py     # Three-robot formation (v1)
+├── 3robot2.py    # Three-robot formation (v2)
+└── obstacle.py   # Obstacle handling for formations
 ```
 
----
-
-# 👥 Two-Robot Formation
-
-The file:
-
-```text
-2robot.py
-```
-
-contains the development implementation for coordinating two robots.
-
-The objective is to allow multiple robots to maintain a defined relationship or formation while moving.
-
-Conceptually:
+## 👥 Two-Robot Formation
 
 ```text
         Robot 1
-           │
            │
            ▼
       Formation Logic
@@ -540,20 +467,7 @@ Conceptually:
         Robot 2
 ```
 
----
-
-# 👥👥 Three-Robot Formation
-
-The workspace contains two implementations for three-robot coordination:
-
-```text
-3robot.py
-3robot2.py
-```
-
-These files are used for experimentation with different multi-robot formation strategies.
-
-A typical formation can be represented as:
+## 👥👥 Three-Robot Formation
 
 ```text
              Robot 1
@@ -564,23 +478,7 @@ A typical formation can be represented as:
         Robot 2 ─── Robot 3
 ```
 
-The exact formation geometry depends on the implementation.
-
----
-
-# 🚧 Obstacle Handling
-
-The file:
-
-```text
-obstacle.py
-```
-
-contains development code related to obstacle handling for multi-robot coordination.
-
-The objective is to extend formation control so that the robot group can react to obstacles while maintaining coordinated movement.
-
-Conceptually:
+## 🚧 Obstacle Handling
 
 ```text
               Obstacle
@@ -598,13 +496,9 @@ Conceptually:
         Robot 3
 ```
 
-Future versions can combine obstacle avoidance with dynamic formation reconfiguration.
-
 ---
 
 # 🔄 Multi-Robot System Architecture
-
-The overall multi-robot architecture can be represented as:
 
 ```text
                  Environment
@@ -633,8 +527,6 @@ The overall multi-robot architecture can be represented as:
 
 # 🧠 Overall System Workflow
 
-The complete development workflow is:
-
 ```text
                          START
                            │
@@ -642,10 +534,10 @@ The complete development workflow is:
                     Robot Bringup
                            │
                            ▼
-                    Sensor Startup
+                 Sensor + EKF Startup
                            │
                            ▼
-                       2D LiDAR
+                    YDLidar 2D LiDAR
                            │
                            ▼
                     Cartographer
@@ -657,7 +549,7 @@ The complete development workflow is:
                        Save Map
                            │
                            ▼
-                    Localization
+                 Nav2 Localization
                            │
                            ▼
                  Autonomous Navigation
@@ -677,17 +569,13 @@ The complete development workflow is:
 
 # 📊 ROS2 Communication
 
-The system uses ROS2 topics and TF for communication between different components.
-
 Important interfaces include:
 
 ### Velocity Command
 
 ```text
-/bumpy7/cmd_vel
+/cmd_vel
 ```
-
-Used to send velocity commands to the robot.
 
 ### LiDAR
 
@@ -695,20 +583,17 @@ Used to send velocity commands to the robot.
 /scan
 ```
 
-Used for LiDAR range measurements.
+### Odometry / TF
 
-Other topics and TF frames depend on the robot and sensor configuration.
+```text
+/odom
+odom → base_link (EKF-fused)
+```
 
 To inspect available topics:
 
 ```bash
 ros2 topic list
-```
-
-To inspect a topic:
-
-```bash
-ros2 topic echo /bumpy7/cmd_vel
 ```
 
 To inspect the TF tree:
@@ -719,25 +604,25 @@ ros2 run tf2_tools view_frames
 
 ---
 
-# 🧪 Development
+# 📟 YDLidar Driver & SDK
 
-During development, the `Bumpy Rviz` directory can be used for visualization and debugging.
+The `ydlidar_ros2_driver` package (C++) wraps the vendored `YDLidar-SDK` to provide ROS2 LaserScan output.
 
-The multi-robot development code is located in:
+Build the SDK (if not already built):
 
-```text
-src/formation_control/
+```bash
+cd src/YDLidar-SDK
+mkdir -p build && cd build
+cmake ..
+make
+sudo make install
 ```
 
-This allows the core AMR stack and experimental multi-robot algorithms to remain modular.
+Then build the ROS2 driver as part of the workspace via `colcon build`.
 
 ---
 
 # 📁 Recommended Git Ignore
-
-Generated ROS2 build files and Python cache files should not be committed.
-
-Recommended `.gitignore`:
 
 ```gitignore
 # ROS2
@@ -748,6 +633,15 @@ log/
 # Python
 __pycache__/
 *.pyc
+
+# Backups
+*.bak
+*.bak2
+*.backup
+*.backup.*
+
+# YDLidar-SDK build artifacts
+src/YDLidar-SDK/build/
 
 # IDE
 .vscode/
@@ -763,12 +657,13 @@ __pycache__/
 
 The system is designed to demonstrate:
 
+- ✅ EKF-based sensor fusion
 - ✅ Real-time LiDAR mapping
 - ✅ Cartographer SLAM
-- ✅ Saved occupancy-grid maps
-- ✅ RViz visualization
-- ✅ Manual robot control
-- ✅ Autonomous navigation
+- ✅ Saved occupancy-grid maps + waypoints
+- ✅ Nav2 autonomous navigation
+- ✅ Manual keyboard robot control
+- ✅ Sensor dashboard (camera, IMU, gas, OLED, web)
 - ✅ Multi-robot formation control
 - ✅ Obstacle-aware multi-robot development
 
@@ -798,13 +693,12 @@ Example:
 - Improved local planning
 - Adaptive planner selection
 - Improved localization
-- Sensor fusion
 
 ### Perception
 
-- LiDAR + IMU fusion
+- LiDAR + IMU fusion refinement
 - LiDAR + Camera fusion
-- AI-based object detection
+- AI-based object detection (YOLOv8)
 - Dynamic obstacle tracking
 
 ### Multi-Robot
@@ -815,7 +709,6 @@ Example:
 - Collision avoidance
 - Multi-robot task allocation
 - Swarm intelligence
-- Distributed navigation
 
 ### Remote Operation
 
@@ -827,8 +720,6 @@ Example:
 ---
 
 # 🎯 Potential Applications
-
-The platform can be extended for:
 
 - 🏭 Warehouse automation
 - 📦 Material transportation
@@ -843,9 +734,11 @@ The platform can be extended for:
 
 # 👨‍💻 Author
 
-**Raja**
+**N N Rajagopal**
 
 ROS2 | Autonomous Mobile Robots | SLAM | Navigation | Multi-Robot Systems
+
+Portfolio: rajagopal95.github.io/Portfolio
 
 ---
 
