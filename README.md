@@ -785,9 +785,11 @@ Example:
 
 ---
 
-# 👨‍💻 Author
+# 👨‍💻 Authors
 
 **N N Rajagopal**
+**Venket Ramana R S**
+**Harishwaran T**
 
 ROS2 | Autonomous Mobile Robots | SLAM | Navigation | Multi-Robot Systems
 
