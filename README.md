@@ -290,18 +290,6 @@ ros2 launch bumpy_bringup minimal.launch.py
 
 ---
 
-# 📡 LiDAR
-
-The robot uses a **YDLidar 2D LiDAR** for environment perception.
-
-Launch the driver:
-
-```bash
-ros2 launch ydlidar_ros2_driver ydlidar_launch.py
-```
-
----
-
 # 🧮 Sensor Fusion (EKF)
 
 Odometry and IMU data are fused using `robot_localization`, configured at:
@@ -782,7 +770,9 @@ Example:
 
 **N N Rajagopal**
 
+
 **Venket Ramana R S**
+
 
 **Harishwaran T**
 
