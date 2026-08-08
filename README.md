@@ -74,13 +74,6 @@ The `formation_control` package contains:
 - 3-robot formation control (two implementations)
 - Obstacle handling for multi-robot formations
 
-### 📟 LiDAR
-
-- Custom `ydlidar_ros2_driver` package (C++ driver, RViz configs)
-- Vendored `YDLidar-SDK` for hardware communication
-
----
-
 # 🛠️ Technology Stack
 
 | Component | Technology |
@@ -788,7 +781,9 @@ Example:
 # 👨‍💻 Authors
 
 **N N Rajagopal**
+
 **Venket Ramana R S**
+
 **Harishwaran T**
 
 ROS2 | Autonomous Mobile Robots | SLAM | Navigation | Multi-Robot Systems
