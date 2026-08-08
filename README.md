@@ -18,7 +18,7 @@ The workspace contains:
 - Robot description (URDF/xacro) + EKF sensor fusion
 - Low-level firmware (motor control, teleop, tick publishing)
 - Sensor drivers (camera, IMU, gas sensor, OLED, web dashboard, leader election)
-- SLAM (Cartographer)
+- SLAM (slam_toolbox + Cartographer)
 - Autonomous navigation (Nav2)
 - Multi-robot formation control
 - YDLidar ROS2 driver + SDK
@@ -39,7 +39,7 @@ The architecture is designed to be extendable for **multi-robot coordination, sw
 
 ### 🗺️ SLAM & Mapping
 
-- Google Cartographer SLAM (`bumpy_slam`)
+- Dual SLAM support: **slam_toolbox** and **Google Cartographer** (`bumpy_slam`)
 - Real-time 2D map generation
 - Map saving (`save_map.launch.py`)
 - Multiple saved maps (`amr_map`, `maze`, `room_map`, `SREC_COE_NEW`)
@@ -88,7 +88,7 @@ The `formation_control` package contains:
 | Operating System | Ubuntu 22.04 |
 | Middleware | ROS2 Humble |
 | Programming | Python / C++ |
-| SLAM | Google Cartographer |
+| SLAM | slam_toolbox, Google Cartographer |
 | Navigation | ROS2 Navigation Stack (Nav2) |
 | Sensor Fusion | robot_localization (EKF) |
 | Visualization | RViz2 |
@@ -157,14 +157,14 @@ bumpy_ws/
 │   │   │   └── web_server_node.py
 │   │   └── test/
 │   │
-│   ├── bumpy_slam/                 # Cartographer SLAM + maps
+│   ├── bumpy_slam/                 # SLAM (slam_toolbox + Cartographer) + maps
 │   │   ├── bumpy_slam/
 │   │   ├── config/
 │   │   │   ├── slam.lua
 │   │   │   └── slam_params.yaml
 │   │   ├── launch/
-│   │   │   ├── slam.launch.py
-│   │   │   ├── cartographer.launch.py
+│   │   │   ├── slam.launch.py          # slam_toolbox
+│   │   │   ├── cartographer.launch.py  # Cartographer
 │   │   │   ├── save_map.launch.py
 │   │   │   └── sllidar_a1_launch.py
 │   │   ├── maps/
@@ -226,6 +226,7 @@ bumpy_ws/
 - Python 3
 - Colcon
 - RViz2
+- slam_toolbox
 - Cartographer
 - Navigation2
 - robot_localization (EKF)
@@ -236,6 +237,7 @@ Install required ROS2 packages:
 sudo apt update
 
 sudo apt install \
+ros-humble-slam-toolbox \
 ros-humble-cartographer \
 ros-humble-cartographer-ros \
 ros-humble-navigation2 \
@@ -324,17 +326,30 @@ This publishes a filtered `odom → base_link` transform used by SLAM and Nav2.
 
 # 🗺️ SLAM
 
-The project uses **Google Cartographer** for real-time SLAM.
+The project supports two SLAM backends: **slam_toolbox** and **Google Cartographer**.
+
+### slam_toolbox
 
 ```bash
 ros2 launch bumpy_slam slam.launch.py
 ```
 
-Cartographer parameters:
+Parameters:
+
+```text
+src/bumpy_slam/config/slam_params.yaml
+```
+
+### Cartographer
+
+```bash
+ros2 launch bumpy_slam cartographer.launch.py
+```
+
+Parameters:
 
 ```text
 src/bumpy_slam/config/slam.lua
-src/bumpy_slam/config/slam_params.yaml
 ```
 
 ---
@@ -540,6 +555,7 @@ formation_control/
                     YDLidar 2D LiDAR
                            │
                            ▼
+                 slam_toolbox /
                     Cartographer
                            │
                            ▼
@@ -659,7 +675,7 @@ The system is designed to demonstrate:
 
 - ✅ EKF-based sensor fusion
 - ✅ Real-time LiDAR mapping
-- ✅ Cartographer SLAM
+- ✅ Dual SLAM support (slam_toolbox + Cartographer)
 - ✅ Saved occupancy-grid maps + waypoints
 - ✅ Nav2 autonomous navigation
 - ✅ Manual keyboard robot control
