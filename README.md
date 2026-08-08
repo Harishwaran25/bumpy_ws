@@ -165,8 +165,7 @@ bumpy_ws/
 │   │   ├── launch/
 │   │   │   ├── slam.launch.py          # slam_toolbox
 │   │   │   ├── cartographer.launch.py  # Cartographer
-│   │   │   ├── save_map.launch.py
-│   │   │   └── sllidar_a1_launch.py
+│   │   │   └── save_map.launch.py
 │   │   ├── maps/
 │   │   │   ├── amr_map.pgm / .yaml
 │   │   │   ├── maze.pgm / .yaml
@@ -302,12 +301,6 @@ Launch the driver:
 
 ```bash
 ros2 launch ydlidar_ros2_driver ydlidar_launch.py
-```
-
-Or via the SLAM package's wrapper:
-
-```text
-src/bumpy_slam/launch/sllidar_a1_launch.py
 ```
 
 ---
