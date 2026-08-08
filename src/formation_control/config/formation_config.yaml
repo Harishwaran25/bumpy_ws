@@ -1,0 +1,9 @@
+/**:
+  ros__parameters:
+    formation:
+      spacing: 1.0     # meters between robots
+      
+    collision_avoidance:
+      safe_distance: 0.5  # meters
+      max_linear_speed: 0.5  # m/s
+      max_angular_speed: 1.0  # rad/s
