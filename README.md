@@ -104,6 +104,10 @@ The `formation_control` package contains:
 ```text
 bumpy_ws/
 │
+├── Bumpy Rviz/                     # Saved RViz2 configs for mapping/navigation
+│   ├── bumpy7.rviz
+│   └── ...
+│
 ├── src/
 │   │
 │   ├── bumpy_bringup/              # Top-level robot bringup
@@ -429,6 +433,46 @@ Nav2 parameters:
 
 ```text
 src/bumpy_navigation/params/nav2_params.yaml
+```
+
+---
+
+# 🖥️ Visualizing in RViz2
+
+You can view LiDAR scans, TF frames, maps, and navigation data in RViz2 on your own computer.
+
+## LiDAR Config
+
+An RViz config is included with the LiDAR driver:
+
+```text
+src/ydlidar_ros2_driver/config/ydlidar.rviz
+```
+
+```bash
+rviz2 -d src/ydlidar_ros2_driver/config/ydlidar.rviz
+```
+
+## Mapping (SLAM)
+
+While running slam_toolbox or Cartographer, open RViz2 and set the Fixed Frame to `map`, then add `Map`, `LaserScan`, and `TF` displays. Load your saved mapping config from the `Bumpy Rviz` folder:
+
+```bash
+rviz2 -d "Bumpy Rviz/bumpy7.rviz"
+```
+
+## Navigation (Nav2)
+
+While `bumpy_navigation` is running, open RViz2 and add displays for `Map`, `Costmap` (global/local), `Path`, `LaserScan`, and `TF`. Load your saved navigation config from the `Bumpy Rviz` folder:
+
+```bash
+rviz2 -d "Bumpy Rviz/bumpy7.rviz"
+```
+
+Nav2's bundled default config also works if installed:
+
+```bash
+rviz2 -d /opt/ros/humble/share/nav2_bringup/rviz/nav2_default_view.rviz
 ```
 
 ---
